@@ -9,6 +9,27 @@ import {
   Inbox, GitBranch, Package, Star, Activity, User
 } from "lucide-react";
 
+// ─── usePersistedState: unified sessionStorage hook ───
+// Replaces the pattern of useState+useEffect wrapping sessionStorage with try/catch
+function usePersistedState(key, initialValue, validate) {
+  const [value, setValue] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(key);
+      if (saved === null) return initialValue;
+      const parsed = (saved.startsWith("{") || saved.startsWith("[")) ? JSON.parse(saved) : saved;
+      if (validate && !validate(parsed)) return initialValue;
+      return parsed;
+    } catch(e) { return initialValue; }
+  });
+  useEffect(() => {
+    try {
+      const toStore = typeof value === "object" && value !== null ? JSON.stringify(value) : String(value);
+      sessionStorage.setItem(key, toStore);
+    } catch(e) {}
+  }, [key, value]);
+  return [value, setValue];
+}
+
 // ─── THEME ───
 const B = {
   accent: "#1E40AF", accentL: "#DBEAFE",
@@ -45,7 +66,7 @@ const ROLE_ACCESS = {
     label: "Кредитный аналитик",
     description: "Верифицирует скоринг. ≤50K подписывает сам. >50K передаёт ЛПР.",
     modules: ["dashboard", "pipeline", "clients", "scoring-admin"],
-    stages: ["scoring_received", "analyst_verification", "grey_zone"],
+    stages: ["analyst_verification", "grey_zone"],
     assignmentStages: [],
     color: "#1E40AF",
     icon: "👤",
@@ -63,7 +84,7 @@ const ROLE_ACCESS = {
     label: "УСКО — оформление договоров",
     description: "Вносит номер счёта из АБС, генерирует ген.договор, обрабатывает уступки.",
     modules: ["dashboard", "pipeline", "clients", "documents", "assignments"],
-    stages: ["contract_preparation", "deal_activation"],
+    stages: ["contract_preparation", "client_activation"],
     assignmentStages: ["usko_checking", "ds_preparing", "payment_approved"],
     canRequestLimitReview: true,
     color: "#EA580C",
@@ -100,16 +121,17 @@ function getMyStages(user) {
 }
 
 // SLA = 1 рабочий день на ВСЮ фазу одобрения (от подачи заявки до принятия решения).
-// Одобрение = scoring_received → analyst_verification → lpr_decision (для >50K).
+// Одобрение = analyst_verification → lpr_decision (для >50K).
+// Скоринг теперь автоматически попадает сразу в analyst_verification (без ручного "Взять в работу").
 // После одобрения идут этапы оформления договора — у них свои нормативы (не SLA одобрения).
-const APPROVAL_STAGES = ["scoring_received", "analyst_verification", "lpr_decision", "grey_zone"];
+const APPROVAL_STAGES = ["analyst_verification", "lpr_decision", "grey_zone"];
 
 // Нормативы на этапы оформления (после одобрения). Отдельный SLA от одобрения.
 const POST_APPROVAL_SLA = {
   contract_preparation: 2,
   contract_signing: 1,
   client_signing: 5, // у клиента своё — банк на это не влияет, но трекаем
-  deal_activation: 1,
+  client_activation: 1,
 };
 
 // Подсчёт рабочих дней между двумя датами (простая версия: пн-пт, без праздников)
@@ -175,7 +197,7 @@ function collectAllMyTasks(user, data) {
     // Sub-categorize by state
     let category;
     if (overdue) category = "urgent";
-    else if (p.stage === "scoring_received") category = "new";
+    else if (p.stage === "analyst_verification" && !p.analystTakenBy) category = "new";
     else if (p.stage === "grey_zone") category = "review";
     else if (p.stage === "client_signing") category = "waiting_client";
     else category = "in_progress";
@@ -293,6 +315,39 @@ function collectAllMyTasks(user, data) {
   return allTasks;
 }
 
+// ─── getClientStatus: compute client status from pipeline + stoplist ───
+// Returns one of: "active", "inactive", "rejected", "grey_zone", "stoplist"
+function getClientStatus(client, pipeline, stoplist) {
+  // Check stoplist first
+  const inStoplist = (stoplist || []).some(s => s.unp === client.unp);
+  if (inStoplist) return "stoplist";
+
+  // Find most recent request in pipeline for this client
+  const requests = (pipeline || []).filter(p => p.creditorId === client.id);
+  if (requests.length === 0) {
+    // No active request — use company's own status
+    if (client.status === "rejected") return "rejected";
+    if (client.status === "grey_zone") return "grey_zone";
+    if (client.status === "active") return "active";
+    return "inactive";
+  }
+
+  // Get most recent (by created date)
+  const latest = [...requests].sort((a, b) => new Date(b.created||0) - new Date(a.created||0))[0];
+  if (latest.stage === "active") return "active";
+  if (latest.stage === "rejected") return "rejected";
+  if (latest.stage === "grey_zone") return "grey_zone";
+  // Any in-process stage means inactive
+  return "inactive";
+}
+
+// Helper: find the most recent request for a client (used for banners in detail view)
+function getLatestClientRequest(client, pipeline) {
+  const requests = (pipeline || []).filter(p => p.creditorId === client.id);
+  if (requests.length === 0) return null;
+  return [...requests].sort((a, b) => new Date(b.created||0) - new Date(a.created||0))[0];
+}
+
 // Count tasks per module for current user (for dynamic sidebar badges)
 function countMyTasks(user, data) {
   const tasks = collectAllMyTasks(user, data);
@@ -337,13 +392,12 @@ function getClientSilenceDays(req) {
 function getAverageDaysOnStage(stage, tier) {
   // Mock benchmark data for demo
   const averages = {
-    scoring_received: 0.5,
     analyst_verification: tier === "simple" ? 0.3 : 1.2,
     lpr_decision: 0.8,
     contract_preparation: 0.4,
     contract_signing: 0.3,
     client_signing: 1.5,
-    deal_activation: 0.2,
+    client_activation: 0.2,
   };
   return averages[stage] ?? null;
 }
@@ -355,9 +409,8 @@ function getMainActionLabel(stage, role) {
     contract_preparation: "сгенерировать договор",
     contract_signing: "подписать ЭЦП",
     client_signing: "проверить подпись клиента",
-    deal_activation: "активировать сделку",
+    client_activation: "активировать клиента",
     grey_zone: "реанимировать",
-    scoring_received: "проверить",
   };
   return labels[stage] || "обработать";
 }
@@ -414,9 +467,9 @@ const ALL_DEALS = [
 ];
 
 const PIPELINE = [
-  // scoring_received
+  // analyst_verification — автоматически после скоринга (scoring_received этап убран)
   {id:"REQ-001", type:"debtor_scoring", company:"ООО «НовоТрейд»", unp:"590123456",
-   creditorId:1, stage:"scoring_received", stageStartDate:"2026-03-24", priority:"high", created:"2026-03-24",
+   creditorId:1, stage:"analyst_verification", stageStartDate:"2026-03-24", priority:"high", created:"2026-03-24",
    requestedAmount:30000, tier:"simple", scoringClass:"B", scoringTotal:135, legat:"clean", bki:"good",
    docs:{consentBki:true, legat:true}, comments:[],
    expectedDebtors:[{companyId:2, name:"ООО «БелТехСнаб»", expectedVolume:30000}],
@@ -425,7 +478,7 @@ const PIPELINE = [
      {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-24 10:12"},
    ]},
   {id:"REQ-002", type:"debtor_scoring", company:"ЧУП «ЕвроКомплект»", unp:"194567890",
-   creditorId:1, stage:"scoring_received", stageStartDate:"2026-03-25", priority:"medium", created:"2026-03-25",
+   creditorId:1, stage:"analyst_verification", stageStartDate:"2026-03-25", priority:"medium", created:"2026-03-25",
    requestedAmount:45000, tier:"simple", scoringClass:"A", scoringTotal:165, legat:"clean", bki:"good",
    docs:{consentBki:true, legat:true}, comments:[],
    expectedDebtors:[{companyId:2, name:"ООО «БелТехСнаб»", expectedVolume:25000},{companyId:7, name:"ООО «ПромТорг»", expectedVolume:20000}],
@@ -434,7 +487,7 @@ const PIPELINE = [
      {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-25 09:04"},
    ]},
 
-  // analyst_verification
+  // analyst_verification (взятые в работу)
   {id:"REQ-003", type:"debtor_scoring", company:"ООО «ТехноГрупп»", unp:"290567890",
    creditorId:1, stage:"analyst_verification", stageStartDate:"2026-03-18", priority:"high", created:"2026-03-18",
    requestedAmount:180000, tier:"extended", scoringClass:"A", scoringTotal:155,
@@ -516,9 +569,9 @@ const PIPELINE = [
      {action:"contract_signed_bank", user:"Татьяна К.", userRole:"signer", date:"2026-03-16 09:00", comment:null},
    ]},
 
-  // deal_activation
+  // client_activation
   {id:"REQ-009", type:"debtor_scoring", company:"ООО «АгроТрейд»", unp:"390456789",
-   creditorId:1, stage:"deal_activation", stageStartDate:"2026-03-12", priority:"medium", created:"2026-03-10",
+   creditorId:1, stage:"client_activation", stageStartDate:"2026-03-12", priority:"medium", created:"2026-03-10",
    requestedAmount:60000, tier:"extended", scoringClass:"A", scoringTotal:158,
    approvedLimit:60000, approvedRate:25, accountNumber:"3819000012347",
    docs:{consentBki:true, legat:true, decision:"signed", generalContract:"signed_all"},
@@ -538,7 +591,7 @@ const PIPELINE = [
    creditorId:1, stage:"active", stageStartDate:"2026-01-15", priority:"medium", created:"2026-01-10",
    requestedAmount:500000, tier:"extended", scoringClass:"A", scoringTotal:168,
    approvedLimit:500000, approvedRate:25, accountNumber:"3819000001234",
-   contractType:"general", assignmentIds:["ASG-001","ASG-002","ASG-003","ASG-004","ASG-005","ASG-006"],
+   assignmentIds:["ASG-001","ASG-002","ASG-003","ASG-004","ASG-005","ASG-006"],
    docs:{consentBki:true, legat:true, decision:"signed", generalContract:"signed_all"},
    comments:[{user:"УСКО",date:"2026-01-15",text:"Сделка активирована. Ген.договор №1 действует."}],
    history:[
@@ -582,6 +635,12 @@ const ASSIGNMENTS = [
   {id:"ASG-001", dealId:"REQ-010", creditorId:1, debtorId:2, amount:45000, discount:2774, toReceive:42226,
    stage:"paid", stageStartDate:"2026-03-15", createdDate:"2026-03-10", shippingDate:"2026-03-08",
    ttnNumber:"ТТН-45",
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-12",
+   dsNumber:"ДС-REQ-010-001", dsDate:"2026-03-12",
+   signedByBank:"Татьяна К.", signedByBankDate:"2026-03-12",
+   signedByClientDate:"2026-03-13",
+   paymentApprovedBy:"Петрова Н.А.", paymentApprovedDate:"2026-03-14",
+   paidDate:"2026-03-15",
    docs:{
      dkp:{status:"signed",date:"2026-03-10"}, ttn:{status:"signed",date:"2026-03-10"},
      actReconciliation:{status:"signed",date:"2026-03-11",signedBy:"ООО «БелТехСнаб»"},
@@ -629,12 +688,14 @@ const ASSIGNMENTS = [
    ]},
 
   // Signer — bank SLA critical
-  {id:"ASG-004", dealId:"REQ-010", creditorId:1, debtorId:2, amount:18000,
-   stage:"ds_signing_bank", stageStartDate:"2026-03-23", createdDate:"2026-03-22",
+  {id:"ASG-004", dealId:"REQ-010", creditorId:1, debtorId:2, amount:18000, discount:1110, toReceive:16890,
+   stage:"ds_signing_bank", stageStartDate:"2026-03-23", createdDate:"2026-03-22", shippingDate:"2026-03-20",
    ttnNumber:"ТТН-50",
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-24",
+   dsNumber:"ДС-REQ-010-004", dsDate:"2026-03-25",
    docs:{
      dkp:{status:"signed"}, ttn:{status:"signed"}, actReconciliation:{status:"signed"},
-     supplementaryAgreement:{status:"pending_bank"},
+     supplementaryAgreement:{status:"pending_bank", number:"ДС-REQ-010-004"},
    },
    history:[
      {action:"docs_uploaded",user:"ООО «СитиБетонСтрой»",date:"2026-03-22 14:00"},
@@ -655,10 +716,13 @@ const ASSIGNMENTS = [
    ]},
 
   // DS signing client — waiting, didn't open
-  {id:"ASG-006", dealId:"REQ-010", creditorId:1, debtorId:2, amount:22000,
-   stage:"ds_signing_client", stageStartDate:"2026-03-18", createdDate:"2026-03-18",
+  {id:"ASG-006", dealId:"REQ-010", creditorId:1, debtorId:2, amount:22000, discount:1356, toReceive:20644,
+   stage:"ds_signing_client", stageStartDate:"2026-03-18", createdDate:"2026-03-18", shippingDate:"2026-03-15",
    ttnNumber:"ТТН-52",
-   docs:{supplementaryAgreement:{status:"pending_client"}},
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-18",
+   dsNumber:"ДС-REQ-010-006", dsDate:"2026-03-18",
+   signedByBank:"Татьяна К.", signedByBankDate:"2026-03-18",
+   docs:{supplementaryAgreement:{status:"pending_client", number:"ДС-REQ-010-006", date:"2026-03-18"}},
    clientActivity:{
      supplier:{notifiedAt:"2026-03-18 11:00", lastOpenedAt:null},
    },
@@ -708,7 +772,7 @@ const AUDIT_LOG = [
    details:{amount:100000, rate:25, ecpUsed:true, ipAddress:"10.0.0.1"}},
   {id:"log-2", date:"2026-03-26 10:15:33", userId:3, userName:"Петрова Н.А.", userRole:"usko_prepare",
    action:"contract_generated", objectType:"request", objectId:"REQ-007",
-   details:{accountNumber:"3819000012345", contractType:"general", ipAddress:"10.0.0.2"}},
+   details:{accountNumber:"3819000012345", ipAddress:"10.0.0.2"}},
   {id:"log-3", date:"2026-03-26 14:30:45", userId:4, userName:"Татьяна К.", userRole:"signer",
    action:"returned_to_usko", objectType:"request", objectId:"REQ-007",
    details:{issues:["wrong_account","wrong_amount"], comment:"Неверные реквизиты счёта", ipAddress:"10.0.0.3"}},
@@ -1055,7 +1119,6 @@ const DOC_TYPE_LABELS = {
   decision:"Решение о предоставлении факторинга",
   generalContract:"Генеральный договор факторинга",
   gd:"Ген. договор",
-  onetimeContract:"Разовый договор",
   supplementaryAgreement:"Допсоглашение",
   ds:"Допсоглашение",
   notification:"Уведомление об уступке",
@@ -1226,7 +1289,7 @@ const AUDIT_ACTION_LABELS = {
   returned_to_supplier:"Запрос документов у поставщика",
   contract_generated:"Договор сгенерирован",
   contract_signed_bank:"Договор подписан банком",
-  activated:"Сделка активирована",
+  activated:"Клиент активирован, может создавать уступки",
   login:"Вход в систему",
   logout:"Выход из системы",
   stoplist_added:"Добавлено в стоп-лист",
@@ -1402,14 +1465,20 @@ const KPICard = ({label,value,sub,icon:Icon,color,trend,tooltip}) => (
   </Card>
 );
 
-const PageHeader = ({title,breadcrumbs,onBack,actions}) => (
+const PageHeader = ({title,subtitle,breadcrumbs,onBack,actions}) => (
   <div className="mb-6">
     {breadcrumbs&&<div className="flex items-center gap-1.5 text-xs mb-2" style={{color:B.t3}}>
       {onBack&&<button onClick={onBack} className="flex items-center gap-1 hover:text-slate-600 mr-1"><ArrowLeft size={14}/>Назад</button>}
       {breadcrumbs.map((b,i)=><span key={i} className="flex items-center gap-1.5">{i>0&&<ChevronRight size={12}/>}<span className={i===breadcrumbs.length-1?"font-medium text-slate-600":""}>{b}</span></span>)}
     </div>}
     <div className="flex items-center justify-between gap-3 flex-wrap">
-      <h1 className="text-xl font-bold" style={{color:B.t1}}>{title}</h1>
+      <div className="flex items-baseline gap-2 flex-wrap min-w-0">
+        <h1 className="text-xl font-bold" style={{color:B.t1}}>{title}</h1>
+        {subtitle && <h2 className="text-base font-medium truncate" style={{color:B.t2}}>
+          <span className="mx-1" style={{color:B.t3}}>·</span>
+          {subtitle}
+        </h2>}
+      </div>
       {actions&&<div className="flex items-center gap-2 flex-wrap">{actions}</div>}
     </div>
   </div>
@@ -1581,7 +1650,46 @@ function AccessDenied({moduleName, onGoHome}) {
 }
 
 // ─── MAIN APP ───
-export default function App() {
+// ─── ErrorBoundary: protects against runtime errors (white screen) ───
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {hasError: false, error: null};
+  }
+  static getDerivedStateFromError(error) {
+    return {hasError: true, error};
+  }
+  componentDidCatch(error, info) {
+    console.error("ErrorBoundary caught:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return <div className="min-h-screen flex items-center justify-center p-6 bg-slate-50">
+        <div className="max-w-lg p-6 rounded-2xl bg-white shadow-xl">
+          <div className="text-4xl mb-3">⚠️</div>
+          <h1 className="text-xl font-bold mb-2" style={{color:"#DC2626"}}>Что-то пошло не так</h1>
+          <p className="text-sm mb-4" style={{color:"#64748B"}}>
+            Страница столкнулась с ошибкой и не может корректно отобразиться.
+          </p>
+          <pre className="text-[10px] p-3 rounded-lg bg-slate-50 overflow-x-auto" style={{color:"#475569"}}>
+            {this.state.error?.message || "Неизвестная ошибка"}
+          </pre>
+          <div className="flex gap-2 mt-4">
+            <button onClick={()=>window.location.reload()} className="flex-1 px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold">
+              Перезагрузить
+            </button>
+            <button onClick={()=>{try{sessionStorage.clear()}catch(e){};window.location.reload()}} className="flex-1 px-4 py-2 rounded-lg border border-slate-200 text-sm font-semibold">
+              Сбросить настройки
+            </button>
+          </div>
+        </div>
+      </div>;
+    }
+    return this.props.children;
+  }
+}
+
+function AppInner() {
   const [active, setActive] = useState("dashboard");
   const [navStack, setNavStack] = useState([]);
   const [dark, setDark] = useState(false);
@@ -1947,8 +2055,6 @@ function DashboardPage({pushNav, setToast, currentUser}) {
 
 // Stages (CRM-style, 11 etaпов + 2 side: rejected/grey_zone)
 const PIPELINE_STAGES = [
-  {id:"scoring_received",label:"Скоринг получен",color:B.yellow,role:"system",
-   description:"Платформа автоматически проскорила (Легат + БКИ + отчётность если >50K)"},
   {id:"analyst_verification",label:"Верификация аналитика",color:B.purple,role:"analyst",
    description:"Кредитный аналитик верифицирует скоринг. ≤50K → подписывает решение. >50K → передаёт ЛПР"},
   {id:"lpr_decision",label:"Решение ЛПР",color:"#6366F1",role:"lpr",
@@ -1959,10 +2065,10 @@ const PIPELINE_STAGES = [
    description:"Подписант подписывает ген.договор ЭЦП"},
   {id:"client_signing",label:"Подписание клиентом",color:"#0891B2",role:"client",
    description:"Клиент получает договор, подписывает ЭЦП в своём кабинете"},
-  {id:"deal_activation",label:"Активация сделки",color:B.orange,role:"usko_activate",
-   description:"УСКО активирует сделку в АБС → клиент может подавать уступки"},
-  {id:"active",label:"Активная сделка",color:B.green,role:"active",
-   description:"Цикл уступок: ДКП → ТТН → ЭСЧФ → ДС → Уведомление → Выдача"},
+  {id:"client_activation",label:"Активация клиента",color:B.orange,role:"usko_activate",
+   description:"УСКО активирует клиента в АБС → клиент получает доступ к созданию уступок"},
+  {id:"active",label:"Активный клиент",color:B.green,role:"—",
+   description:"Клиент активен — может создавать уступки по лимиту ген.договора факторинга"},
   {id:"rejected",label:"Отклонено",color:B.red,role:"—",
    description:"Отклонено системой или решением"},
   {id:"grey_zone",label:"Серая зона",color:"#6B7280",role:"—",
@@ -2025,24 +2131,46 @@ const SUPPLIER_RETURN_ISSUES = {
 // ASSIGNMENTS (Branch 6) — constants
 // ═══════════════════════════════════════
 const ASSIGNMENT_STAGES = [
-  {id:"docs_received", label:"Документы от поставщика", color:"#D97706", role:"system", actor:"supplier", phase:"docs"},
-  {id:"debtor_notified", label:"Уведомление должнику", color:"#0891B2", role:"system", actor:"platform", phase:"docs"},
-  {id:"debtor_confirming", label:"Подпись должника", color:"#06B6D4", role:"debtor", actor:"debtor", phase:"docs"},
-  {id:"usko_checking", label:"Проверка комплекта", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"check"},
-  {id:"returned_to_supplier", label:"Возврат поставщику", color:"#DC2626", role:"supplier", actor:"supplier", phase:"check"},
-  {id:"ds_preparing", label:"Формирование ДС", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"sign"},
-  {id:"ds_signing_bank", label:"Подпись ДС банком", color:"#06B6D4", role:"signer", actor:"bank", phase:"sign"},
-  {id:"ds_signing_client", label:"Подпись ДС клиентом", color:"#0891B2", role:"supplier", actor:"supplier", phase:"sign"},
-  {id:"payment_approved", label:"Разрешение на оплату", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"pay"},
-  {id:"paid", label:"Оплачено", color:"#059669", role:"—", actor:"system", phase:"pay"},
+  {id:"docs_received", label:"Документы от поставщика", color:"#D97706", role:"system", actor:"supplier", phase:"docs",
+    actionHint:"Поставщик загружает ДКП, ТТН, ЭСЧФ", whoActs:"👤 Поставщик"},
+  {id:"debtor_notified", label:"Уведомление должнику", color:"#0891B2", role:"system", actor:"platform", phase:"docs",
+    actionHint:"Платформа автоматически отправляет уведомление", whoActs:"⚙ Платформа"},
+  {id:"debtor_confirming", label:"Подпись должника", color:"#06B6D4", role:"debtor", actor:"debtor", phase:"docs",
+    actionHint:"Должник подтверждает получение товара в своём кабинете", whoActs:"🚚 Должник"},
+  {id:"usko_checking", label:"Проверка комплекта", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"check",
+    actionHint:"УСКО: проверить ДКП, ТТН, ЭСЧФ → принять комплект (или вернуть поставщику)", whoActs:"🏦 УСКО-специалист"},
+  {id:"returned_to_supplier", label:"Возврат поставщику", color:"#DC2626", role:"supplier", actor:"supplier", phase:"check",
+    actionHint:"Поставщик исправляет комплект и загружает заново", whoActs:"👤 Поставщик"},
+  {id:"ds_preparing", label:"Формирование ДС", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"sign",
+    actionHint:"УСКО: сформировать ДС (платформа генерирует автоматически)", whoActs:"🏦 УСКО-специалист"},
+  {id:"ds_signing_bank", label:"Подпись ДС банком", color:"#06B6D4", role:"signer", actor:"bank", phase:"sign",
+    actionHint:"Подписант: подписать ДС ЭЦП банка (PIN)", whoActs:"🏦 Подписант банка"},
+  {id:"ds_signing_client", label:"Подпись ДС клиентом", color:"#0891B2", role:"supplier", actor:"supplier", phase:"sign",
+    actionHint:"Клиент подписывает ДС ЭЦП в своём кабинете", whoActs:"👤 Клиент (поставщик)"},
+  {id:"payment_approved", label:"Разрешение на оплату", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"pay",
+    actionHint:"УСКО: проверить реквизиты → разрешить оплату в АБС", whoActs:"🏦 УСКО-специалист"},
+  {id:"paid", label:"Оплачено", color:"#059669", role:"—", actor:"system", phase:"pay",
+    actionHint:"Средства поступили клиенту через АБС банка", whoActs:"⚙ Система"},
 ];
 
 // ─── 4 логические фазы для UI (упрощение 10 микро-этапов) ───
 const ASSIGNMENT_PHASES = [
-  {id:"docs", label:"Документы", icon:"📄", description:"Загрузка и подтверждение должником"},
-  {id:"check", label:"Проверка", icon:"🔍", description:"УСКО проверяет комплект"},
-  {id:"sign", label:"Подписание ДС", icon:"✍️", description:"Банк и клиент подписывают ДС"},
-  {id:"pay", label:"Оплата", icon:"💰", description:"Разрешение и проведение оплаты"},
+  {id:"docs", label:"Документы", icon:"📄",
+    description:"Загрузка комплекта и подтверждение должником",
+    actorsInvolved:"👤 Поставщик + 🚚 Должник",
+    bankAction:"Банк ожидает (не действует)"},
+  {id:"check", label:"Проверка", icon:"🔍",
+    description:"УСКО проверяет комплект документов",
+    actorsInvolved:"🏦 УСКО-специалист",
+    bankAction:"Проверить ДКП/ТТН/ЭСЧФ → принять или вернуть"},
+  {id:"sign", label:"Подписание ДС", icon:"✍️",
+    description:"Банк формирует ДС и обе стороны подписывают",
+    actorsInvolved:"🏦 УСКО + 🏦 Подписант + 👤 Клиент",
+    bankAction:"Сформировать ДС → подписать ЭЦП → ждать клиента"},
+  {id:"pay", label:"Оплата", icon:"💰",
+    description:"УСКО разрешает оплату, платформа проводит",
+    actorsInvolved:"🏦 УСКО-специалист",
+    bankAction:"Проверить реквизиты → разрешить оплату в АБС"},
 ];
 
 function getAssignmentPhase(stage) {
@@ -2226,24 +2354,30 @@ function MiniProgress({currentIdx, total, stageLabel}) {
 function UnifiedTaskHub({tasks, onNavigate, currentUser}) {
   if (!tasks || tasks.length === 0) return null;
 
+  // Only show priority-critical buckets here (urgent/urgent_sign/expiring).
+  // All other tasks (new, in_progress, review, waiting_client) go to the unified table below.
+  const PRIORITY_CATEGORIES = ["urgent", "urgent_sign", "expiring"];
+  const priorityTasks = tasks.filter(t => PRIORITY_CATEGORIES.includes(t.category));
+  if (priorityTasks.length === 0) return null;
+
   // Group by category
   const buckets = {
     urgent: [],
     urgent_sign: [],
-    new: [],
-    review: [],
-    in_progress: [],
-    waiting_client: [],
     expiring: [],
   };
-  tasks.forEach(t => {
+  priorityTasks.forEach(t => {
     if (buckets[t.category]) buckets[t.category].push(t);
-    else buckets.in_progress.push(t);
   });
 
-  // Sort each bucket: overdue first, then by days desc
+  // Sort each bucket: (1) unclaimed analyst tasks first, (2) overdue, (3) by days desc
   Object.keys(buckets).forEach(k => {
     buckets[k].sort((a, b) => {
+      // Prioritize pipeline tasks with no analyst taken yet
+      const aUnclaimed = a.type === "pipeline" && a.raw?.stage === "analyst_verification" && !a.raw?.analystTakenBy;
+      const bUnclaimed = b.type === "pipeline" && b.raw?.stage === "analyst_verification" && !b.raw?.analystTakenBy;
+      if (aUnclaimed && !bUnclaimed) return -1;
+      if (!aUnclaimed && bUnclaimed) return 1;
       if (a.overdue && !b.overdue) return -1;
       if (!a.overdue && b.overdue) return 1;
       return (b.days || 0) - (a.days || 0);
@@ -2253,10 +2387,6 @@ function UnifiedTaskHub({tasks, onNavigate, currentUser}) {
   const categoryConfig = {
     urgent: {label: "🔥 Срочно — просрочено SLA", color: B.red, bg: B.redL, pulse: true},
     urgent_sign: {label: "🔏 На вашей подписи", color: "#06B6D4", bg: "#CFFAFE", pulse: true},
-    new: {label: "📥 Новые — взять в работу", color: B.accent, bg: B.accentL},
-    review: {label: "⚪ На рассмотрение (серая зона)", color: "#6B7280", bg: "#F3F4F6"},
-    in_progress: {label: "⏳ В работе", color: B.t2, bg: "#F1F5F9"},
-    waiting_client: {label: "👤 Ждут реакции клиента", color: B.yellow, bg: B.yellowL},
     expiring: {label: "📅 Истекающие документы", color: B.orange, bg: "#FFEDD5"},
   };
 
@@ -2267,11 +2397,11 @@ function UnifiedTaskHub({tasks, onNavigate, currentUser}) {
     <div className="flex items-center justify-between gap-3 flex-wrap">
       <div className="flex items-center gap-3">
         <h2 className="text-base font-black" style={{color: B.t1}}>
-          Мои задачи
+          Требует внимания
         </h2>
         <span className="text-[11px] px-2 py-0.5 rounded-full font-bold"
-          style={{background: B.accentL, color: B.accent}}>
-          {tasks.length}
+          style={{background: B.redL, color: B.red}}>
+          {priorityTasks.length}
         </span>
         {totalUrgent > 0 && <span className="text-[11px] px-2 py-0.5 rounded-full font-bold animate-pulse"
           style={{background: B.red, color: "white"}}>
@@ -2279,7 +2409,7 @@ function UnifiedTaskHub({tasks, onNavigate, currentUser}) {
         </span>}
       </div>
       <div className="text-[10px]" style={{color: B.t3}}>
-        Выполняйте в порядке блоков сверху вниз
+        Остальные задачи — в таблице ниже
       </div>
     </div>
 
@@ -2287,7 +2417,7 @@ function UnifiedTaskHub({tasks, onNavigate, currentUser}) {
     {Object.entries(buckets).filter(([_, items]) => items.length > 0).map(([key, items]) => {
       const cfg = categoryConfig[key];
       return <Card key={key} className="overflow-hidden"
-        style={{borderColor: cfg.color + "40", borderWidth: key === "urgent" || key === "urgent_sign" ? 2 : 1}}>
+        style={{borderColor: cfg.color + "40", borderWidth: 2}}>
         {/* Category header */}
         <div className="flex items-center justify-between gap-2 px-4 py-2.5"
           style={{background: cfg.bg}}>
@@ -2578,15 +2708,6 @@ function TerminologyHelp() {
             (т.к. его лимит уже одобрен). Обрабатывается в модуле «Уступки».
           </div>
         </div>
-        <div className="p-3 rounded-lg" style={{background: B.purpleL}}>
-          <div className="font-bold mb-1.5" style={{color: B.purple}}>🎯 Разовый договор</div>
-          <div style={{color: B.t2}}>
-            Альтернатива ген.договору для <strong>одноразовой сделки</strong>. Клиент получает
-            факторинг один раз без открытия лимита — после выплаты сделка завершается. Здесь
-            заявка и уступка совпадают: документы проверяются вместе, скоринг и договор
-            идут в одном потоке.
-          </div>
-        </div>
         <div className="p-3 rounded-lg" style={{background: "#EEF2FF"}}>
           <div className="font-bold mb-1.5" style={{color: "#6366F1"}}>🏦 Интеграция с АБС банка</div>
           <div style={{color: B.t2}}>
@@ -2604,16 +2725,7 @@ function PipelinePage({currentUser, setToast, favorites, toggleFavorite}) {
   const isAdmin = currentUser.role === "admin";
   // Default to "my tasks" for ALL roles with a persistent choice.
   // Admin with no personal tasks falls back to "all" automatically (first-run only).
-  const [viewMode, setViewMode] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem("pipeline-view-mode");
-      if (saved === "my" || saved === "all") return saved;
-    } catch(e) {}
-    return "my";
-  });
-  useEffect(() => {
-    try { sessionStorage.setItem("pipeline-view-mode", viewMode); } catch(e) {}
-  }, [viewMode]);
+  const [viewMode, setViewMode] = usePersistedState("pipeline-view-mode", "my", v => v === "my" || v === "all");
   const [stageFilter, setStageFilter] = useState("all");
   const [roleFilter, setRoleFilter] = useState("all");
   const [tierFilter, setTierFilter] = useState("all");
@@ -2908,12 +3020,33 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
       </div>
     </Card>}
 
-    {/* UNIFIED TASK HUB — все задачи сотрудника из всех модулей */}
+    {/* UNIFIED TASK HUB — срочные задачи (urgent/urgent_sign/expiring) */}
     {allMyTasks.length > 0 && <UnifiedTaskHub
       tasks={allMyTasks}
       onNavigate={navigateToTask}
       currentUser={currentUser}
     />}
+
+    {/* UNIFIED TABLE — все остальные задачи (не приоритетные) из всех модулей */}
+    {!batchMode && allMyTasks.length > 0 && (() => {
+      // All non-priority tasks across all modules (pipeline + assignment + document)
+      const tableTasks = allMyTasks.filter(t => !["urgent", "urgent_sign", "expiring"].includes(t.category));
+      if (tableTasks.length === 0) return null;
+      return <div className="mb-5">
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-base font-black" style={{color: B.t1}}>Мои задачи в работе</h2>
+          <span className="text-[11px] px-2 py-0.5 rounded-full font-bold"
+            style={{background: B.accentL, color: B.accent}}>
+            {tableTasks.length}
+          </span>
+        </div>
+        <UnifiedTasksTable
+          tasks={tableTasks}
+          currentUser={currentUser}
+          onNavigate={navigateToTask}
+        />
+      </div>;
+    })()}
 
     {/* HERO TASK — глубже-гранулярный hero для конвейерных задач (только если нет cross-module задач) */}
     {allMyTasks.length === 0 && heroTask && filtered.length > 0 && !batchMode && !heroHidden && <HeroTaskCard
@@ -2980,7 +3113,7 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
           <div className="space-y-1 max-h-40 overflow-y-auto">
             {selectedIds.map(id => {
               const r = myData.find(p=>p.id===id);
-              return r ? <div key={id} className="text-[11px]" style={{color:B.t2}}>• <span className="mono font-bold">{r.id}</span> — {r.contractType==="onetime"?"разовый договор":"ген.договор"} · {r.company}</div> : null;
+              return r ? <div key={id} className="text-[11px]" style={{color:B.t2}}>• <span className="mono font-bold">{r.id}</span> — ген.договор · {r.company}</div> : null;
             })}
           </div>
         </div>
@@ -3018,7 +3151,6 @@ function PipelineBatchRow({req, checked, onToggle}) {
         <div className="flex items-center gap-2 mb-0.5 flex-wrap">
           <span className="font-bold mono text-xs" style={{color:B.accent}}>{req.id}</span>
           {tierInfo && <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold" style={{background:tierInfo.color+"15",color:tierInfo.color}}>{tierInfo.label}</span>}
-          <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold" style={{background:B.accentL,color:B.accent}}>{req.contractType==="onetime"?"Разовый":"Ген.договор"}</span>
           {req.requestedAmount && <span className="font-bold mono text-xs" style={{color:B.t1}}>{fmtByn(req.requestedAmount)}</span>}
         </div>
         <div className="text-xs font-medium truncate" style={{color:B.t1}}>{req.company||"—"}</div>
@@ -3106,16 +3238,10 @@ function WorkflowHealthBanner({pipelineData, onStageClick, activeStage}) {
   const OVERLOAD_THRESHOLD = 5;
   const stages = PIPELINE_STAGES.filter(s => !["rejected", "grey_zone", "active"].includes(s.id));
 
-  const [expanded, setExpanded] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem("pipeline-health-expanded");
-      return saved === null ? false : saved === "true"; // default collapsed
-    } catch(e) { return false; }
-  });
-
-  useEffect(() => {
-    try { sessionStorage.setItem("pipeline-health-expanded", String(expanded)); } catch(e) {}
-  }, [expanded]);
+  const [expanded, setExpanded] = usePersistedState("pipeline-health-expanded", false, v => v === true || v === false || v === "true" || v === "false");
+  // Coerce string "true"/"false" to boolean if loaded from older storage
+  const expandedBool = typeof expanded === "string" ? expanded === "true" : expanded;
+  const setExpandedBool = (v) => setExpanded(Boolean(v));
 
   const stats = stages.map(s => ({
     ...s,
@@ -3129,20 +3255,20 @@ function WorkflowHealthBanner({pipelineData, onStageClick, activeStage}) {
   const totalOverdue = stats.reduce((s, st) => s + st.overdueCount, 0);
 
   return <Card className="mb-5">
-    <button onClick={()=>setExpanded(!expanded)}
+    <button onClick={()=>setExpandedBool(!expandedBool)}
       className="w-full flex items-center justify-between gap-3 p-3 hover:bg-slate-50 transition-colors text-left">
       <div className="flex items-center gap-2">
-        {expanded ? <ChevronDown size={14} style={{color:B.t3}}/> : <ChevronRight size={14} style={{color:B.t3}}/>}
+        {expandedBool ? <ChevronDown size={14} style={{color:B.t3}}/> : <ChevronRight size={14} style={{color:B.t3}}/>}
         <span className="text-sm font-bold" style={{color:B.t1}}>Воронка состояний</span>
         <span className="text-[10px]" style={{color:B.t3}}>
           · {totalCount} заявок в работе
           {totalOverdue > 0 && <span style={{color:B.red}}> · {totalOverdue} просрочек</span>}
         </span>
       </div>
-      <span className="text-[10px]" style={{color:B.t3}}>{expanded?"Свернуть":"Развернуть"}</span>
+      <span className="text-[10px]" style={{color:B.t3}}>{expandedBool?"Свернуть":"Развернуть"}</span>
     </button>
 
-    {expanded && <div className="p-4 pt-0">
+    {expandedBool && <div className="p-4 pt-0">
     <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
       <div className="text-[10px]" style={{color: B.t3}}>Кликните на этап для фильтрации списка</div>
       <div className="flex items-center gap-3 text-[10px]" style={{color: B.t3}}>
@@ -3278,6 +3404,119 @@ function HotkeysHelp({open, onClose}) {
 }
 
 // ─── UX REDESIGN v2: Table view for pipeline (like Jira) ───
+// ─── UnifiedTasksTable: cross-module task table (pipeline + assignments + documents) ───
+function UnifiedTasksTable({tasks, onNavigate, currentUser}) {
+  const [sortBy, setSortBy] = useState({col: "sla", dir: "desc"});
+
+  const sorted = [...tasks].sort((a, b) => {
+    const dir = sortBy.dir === "asc" ? 1 : -1;
+    switch(sortBy.col) {
+      case "type": return (a.type || "").localeCompare(b.type || "") * dir;
+      case "id": return (a.id || "").localeCompare(b.id || "") * dir;
+      case "title": return (a.title || "").localeCompare(b.title || "") * dir;
+      case "stage": return (a.subtitle || "").localeCompare(b.subtitle || "") * dir;
+      case "sla": return ((a.days||0) - (b.days||0)) * dir;
+      case "action": return (a.action || "").localeCompare(b.action || "") * dir;
+      default: return 0;
+    }
+  });
+
+  const toggleSort = (col) => setSortBy(prev => ({
+    col,
+    dir: prev.col === col && prev.dir === "desc" ? "asc" : "desc",
+  }));
+
+  const SortableHeader = ({col, children, align="left"}) => (
+    <th className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider cursor-pointer hover:bg-slate-100 select-none"
+      style={{color: B.t3, textAlign: align}}
+      onClick={()=>toggleSort(col)}>
+      <div className="inline-flex items-center gap-1">
+        {children}
+        {sortBy.col === col && <span className="text-[10px]">{sortBy.dir==="desc"?"▼":"▲"}</span>}
+      </div>
+    </th>
+  );
+
+  const typeIconMap = {
+    pipeline: Zap,
+    assignment: Package,
+    document: FileText,
+  };
+  const typeColorMap = {
+    pipeline: B.accent,
+    assignment: B.purple || "#7C3AED",
+    document: "#6366F1",
+  };
+  const typeLabelMap = {
+    pipeline: "Заявка",
+    assignment: "Уступка",
+    document: "Документ",
+  };
+
+  return <Card className="overflow-hidden">
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead style={{background: "#F8FAFC"}}>
+          <tr>
+            <SortableHeader col="type">Тип</SortableHeader>
+            <SortableHeader col="id">ID</SortableHeader>
+            <SortableHeader col="title">Название</SortableHeader>
+            <SortableHeader col="stage">Этап / Фаза</SortableHeader>
+            <SortableHeader col="sla" align="right">SLA</SortableHeader>
+            <SortableHeader col="action">Действие</SortableHeader>
+            <th className="px-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map(t => {
+            const TypeIcon = typeIconMap[t.type] || FileText;
+            const typeColor = typeColorMap[t.type] || B.t2;
+            const typeLabel = typeLabelMap[t.type] || t.type;
+            return <tr key={`${t.type}-${t.id}`}
+              onClick={()=>onNavigate && onNavigate(t)}
+              className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
+              style={{borderColor: B.border, background: t.overdue ? "#FEF2F2" : "white"}}>
+              <td className="px-3 py-2">
+                <div className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold"
+                  style={{background: typeColor+"15", color: typeColor}}>
+                  <TypeIcon size={10}/>
+                  {typeLabel}
+                </div>
+              </td>
+              <td className="px-3 py-2 mono font-semibold" style={{color: typeColor}}>{t.id}</td>
+              <td className="px-3 py-2">
+                <div className="font-semibold truncate max-w-[260px]" style={{color: B.t1}}>{t.title || "—"}</div>
+              </td>
+              <td className="px-3 py-2">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-semibold"
+                  style={{background: (t.color||B.t2)+"15", color: t.color||B.t2}}>
+                  {t.subtitle || "—"}
+                </span>
+              </td>
+              <td className="px-3 py-2 text-right">
+                <span className="mono font-bold" style={{color: t.overdue ? B.red : t.days > (t.limit||1)*0.66 ? B.yellow : B.t2}}>
+                  {t.days != null ? `${t.days}д` : "—"}{t.limit ? ` / ${t.limit}` : ""}
+                </span>
+              </td>
+              <td className="px-3 py-2 text-[11px]" style={{color: B.t2}}>
+                {t.action || "—"}
+              </td>
+              <td className="px-2 py-2 text-right">
+                <ChevronRight size={14} style={{color: B.t3}}/>
+              </td>
+            </tr>;
+          })}
+          {sorted.length === 0 && <tr>
+            <td colSpan={7} className="p-10 text-center text-sm" style={{color: B.t3}}>
+              Нет задач
+            </td>
+          </tr>}
+        </tbody>
+      </table>
+    </div>
+  </Card>;
+}
+
 function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFavorite, onCyclePriority, setToast}) {
   const [sortBy, setSortBy] = useState({col: "sla", dir: "desc"});
 
@@ -3404,9 +3643,14 @@ function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFa
                 </span>}
               </td>
               <td className="px-3 py-2">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{background: stage?.color}}/>
                   <span style={{color: B.t1}}>{stage?.label}</span>
+                  {r.stage === "analyst_verification" && !r.analystTakenBy && <span
+                    className="px-1.5 py-0.5 rounded text-[9px] font-black animate-pulse"
+                    style={{background: B.accent, color: "white"}}>
+                    📥 НОВАЯ
+                  </span>}
                 </div>
               </td>
               <td className="px-3 py-2 text-right">
@@ -3914,20 +4158,19 @@ function CompactWorkflow({req, defaultExpanded}) {
               "contract_preparation":"contract_generated",
               "contract_signing":"contract_signed_bank",
               "client_signing":"contract_signed_client",
-              "deal_activation":"activated",
+              "client_activation":"activated",
             };
             return h.action === actionMap[st.id];
           }) : null;
           const slaLimit = getSlaLimit(st.id, req.tier);
           // Documents that appear at this stage
           const stageDocs = {
-            "scoring_received": ["Согласие БКИ", "Выписка Легат", "Кредитный отчёт БКИ"],
-            "analyst_verification": req.tier === "extended" ? ["Баланс ОПУ"] : [],
+            "analyst_verification": ["Согласие БКИ", "Выписка Легат", "Кредитный отчёт БКИ"].concat(req.tier === "extended" ? ["Баланс ОПУ"] : []),
             "lpr_decision": ["Решение о предоставлении факторинга"],
-            "contract_preparation": [req.contractType === "onetime" ? "Разовый договор" : "Генеральный договор факторинга"],
+            "contract_preparation": ["Генеральный договор факторинга"],
             "contract_signing": ["Подпись банка (ЭЦП)"],
             "client_signing": ["Подпись клиента (ЭЦП)"],
-            "deal_activation": ["Активация в АБС"],
+            "client_activation": ["Активация в АБС"],
           }[st.id] || [];
 
           return <div key={st.id} className="flex items-stretch gap-4 rounded-xl p-4"
@@ -4040,20 +4283,20 @@ function InformationalBanner({req, currentUser}) {
         <CheckCircle size={22} style={{color:B.green}} className="shrink-0 mt-0.5"/>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <div className="text-sm font-bold" style={{color:B.green}}>✅ Активная сделка</div>
-            {req.contractType && <span className="px-2 py-0.5 rounded text-[9px] font-bold" style={{background:req.contractType==="general"?B.accentL:B.purpleL, color:req.contractType==="general"?B.accent:B.purple}}>
-              {req.contractType==="general"?"Генеральный договор":"Разовый договор"}
-            </span>}
+            <div className="text-sm font-bold" style={{color:B.green}}>✅ Активный клиент</div>
+            <span className="px-2 py-0.5 rounded text-[9px] font-bold" style={{background:B.accentL, color:B.accent}}>
+              Генеральный договор
+            </span>
           </div>
           <div className="text-xs mt-1" style={{color:B.t2}}>
-            {req.contractType==="onetime" ? "Разовая сделка — после выдачи завершится" : "Клиент может подавать уступки (ДКП + ТТН)"}
+            Клиент может создавать уступки (ДКП + ТТН) в рамках лимита
           </div>
           <div className="grid grid-cols-3 gap-4 mt-3 text-xs">
             <div><span style={{color:B.t3}}>Лимит:</span> <strong style={{color:B.t1}}>{fmtByn(limit)}</strong></div>
             <div><span style={{color:B.t3}}>Ставка:</span> <strong style={{color:B.t1}}>{req.approvedRate}%</strong></div>
             <div><span style={{color:B.t3}}>Счёт:</span> <span className="mono" style={{color:B.accent}}>{req.accountNumber}</span></div>
           </div>
-          {limit > 0 && req.contractType==="general" && <div className="mt-3">
+          {limit > 0 && <div className="mt-3">
             <div className="flex items-center justify-between text-[10px] mb-1">
               <span style={{color:B.t3}}>Использовано: <strong>{fmtByn(usedAmount)}</strong> · {activeAssignments} активных уступок</span>
               <span className="font-bold" style={{color:B.t1}}>{usagePct}%</span>
@@ -4062,7 +4305,7 @@ function InformationalBanner({req, currentUser}) {
               <div className="h-full transition-all" style={{width:`${usagePct}%`,background:usagePct>80?B.red:usagePct>50?B.yellow:B.green}}/>
             </div>
           </div>}
-          {canRequestLimit && req.contractType==="general" && <div className="mt-3 flex gap-2 flex-wrap">
+          {canRequestLimit && <div className="mt-3 flex gap-2 flex-wrap">
             <Btn size="sm" variant="ghost" icon={TrendingUp} onClick={()=>{
               setNewLimitInput(String(Math.round(limit * 1.5)));
               setLimitJustification("");
@@ -4183,7 +4426,7 @@ function SLABenchmark({req}) {
 
 // Action block (role-specific task)
 // ─── Contract preparation sub-component (isolated hooks) ───
-function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accountInput, setAccountInput, contractType, setContractType, signing, setHandoverModal, handoverModal, handoverSubmit}) {
+function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accountInput, setAccountInput, signing, setHandoverModal, handoverModal, handoverSubmit}) {
   const draftKey = `contract-draft-${req.id}`;
   const [draft, setDraft] = useState(() => {
     try {
@@ -4195,18 +4438,17 @@ function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accou
 
   // Autosave on field change
   useEffect(() => {
-    if (accountInput || contractType !== (req.contractType||"general")) {
+    if (accountInput) {
       try {
-        const d = {accountNumber: accountInput, contractType, savedAt: new Date().toISOString()};
+        const d = {accountNumber: accountInput, savedAt: new Date().toISOString()};
         sessionStorage.setItem(draftKey, JSON.stringify(d));
       } catch(e) {}
     }
-  }, [accountInput, contractType, draftKey, req.contractType]);
+  }, [accountInput, draftKey]);
 
   const loadDraft = () => {
     if (draft) {
       setAccountInput(draft.accountNumber || "");
-      setContractType(draft.contractType || "general");
       setDraftDismissed(true);
     }
   };
@@ -4223,7 +4465,7 @@ function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accou
         <FileText size={18} style={{color:"#6366F1"}} className="shrink-0"/>
         <div className="flex-1 min-w-0">
           <div className="text-xs font-bold" style={{color:"#6366F1"}}>Найден черновик от {new Date(draft.savedAt).toLocaleString("ru-BY")}</div>
-          <div className="text-[10px]" style={{color:B.t2}}>Счёт: {draft.accountNumber||"—"} · Тип: {draft.contractType==="general"?"Генеральный":"Разовый"}</div>
+          <div className="text-[10px]" style={{color:B.t2}}>Счёт: {draft.accountNumber||"—"} · Ген.договор</div>
         </div>
         <Btn size="sm" variant="secondary" onClick={loadDraft}>Продолжить</Btn>
         <Btn size="sm" variant="ghost" onClick={discardDraft}>Начать заново</Btn>
@@ -4258,34 +4500,14 @@ function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accou
         </div>
       </div>
 
-      {/* Contract type picker */}
-      <div className="mb-3">
-        <label className="text-[10px] font-semibold block mb-1.5" style={{color:B.t3}}>Тип договора</label>
-        <div className="grid grid-cols-2 gap-2">
-          <button onClick={()=>setContractType("general")}
-            className="p-3 rounded-xl border text-left transition-all"
-            style={contractType==="general"?{borderColor:B.accent,borderWidth:2,background:B.accentL+"50"}:{borderColor:B.border,background:"white"}}>
-            <div className="flex items-center gap-2 mb-1">
-              <div className="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0" style={{borderColor:contractType==="general"?B.accent:B.border}}>
-                {contractType==="general" && <div className="w-1.5 h-1.5 rounded-full" style={{background:B.accent}}/>}
-              </div>
-              <span className="text-xs font-bold" style={{color:B.t1}}>Генеральный</span>
-            </div>
-            <div className="text-[10px]" style={{color:B.t3}}>Многократные отгрузки в рамках лимита</div>
-            <div className="text-[10px] mt-1 font-semibold" style={{color:B.accent}}>Лимит: {fmtByn(req.approvedLimit||0)}</div>
-          </button>
-          <button onClick={()=>setContractType("onetime")}
-            className="p-3 rounded-xl border text-left transition-all"
-            style={contractType==="onetime"?{borderColor:B.accent,borderWidth:2,background:B.accentL+"50"}:{borderColor:B.border,background:"white"}}>
-            <div className="flex items-center gap-2 mb-1">
-              <div className="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0" style={{borderColor:contractType==="onetime"?B.accent:B.border}}>
-                {contractType==="onetime" && <div className="w-1.5 h-1.5 rounded-full" style={{background:B.accent}}/>}
-              </div>
-              <span className="text-xs font-bold" style={{color:B.t1}}>Разовый</span>
-            </div>
-            <div className="text-[10px]" style={{color:B.t3}}>Одна сделка, закрытие после выдачи</div>
-            <div className="text-[10px] mt-1" style={{color:B.t3}}>Требуется ДКП + ТТН на старте</div>
-          </button>
+      {/* Only general contract is used */}
+      <div className="mb-3 p-3 rounded-xl" style={{background: B.accentL + "40", border: `1px solid ${B.accent}30`}}>
+        <div className="flex items-center gap-2">
+          <FileText size={14} style={{color: B.accent}}/>
+          <span className="text-xs font-bold" style={{color: B.t1}}>Генеральный договор факторинга</span>
+        </div>
+        <div className="text-[10px] mt-1" style={{color: B.t2}}>
+          Многократные уступки в рамках одобренного лимита <strong>{fmtByn(req.approvedLimit||0)}</strong>
         </div>
       </div>
 
@@ -4294,25 +4516,841 @@ function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accou
         <input value={accountInput} onChange={e=>setAccountInput(e.target.value)} placeholder="3819..." className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 mono" style={{color:B.t1}}/>
       </div>
       <div className="text-[10px] p-2 rounded-lg bg-slate-50 mb-3" style={{color:B.t3}}>
-        <strong>Шаги:</strong> 1) Завести карточку в АБС → 2) Получить номер счёта → 3) Выбрать тип договора → 4) «Сгенерировать»
+        <strong>Шаги:</strong> 1) Завести карточку в АБС → 2) Получить номер счёта → 3) «Сгенерировать»
       </div>
       <Btn size="md" icon={signing?Loader2:FileText} disabled={signing||!accountInput} className="w-full"
         onClick={()=>{
           try { sessionStorage.removeItem(draftKey); } catch(e) {}
           setHandoverModal({
             nextStage:"contract_signing",
-            extraData:{accountNumber:accountInput, contractType},
-            message:`${contractType==="general"?"Ген.договор":"Разовый договор"} сгенерирован. Передан подписанту`,
+            extraData:{accountNumber:accountInput},
+            message:`Ген.договор сгенерирован. Передан подписанту`,
             toUser: signerUser
           });
         }}>
-        {signing?"Генерация...":`📄 СГЕНЕРИРОВАТЬ ${contractType==="general"?"ГЕН.ДОГОВОР":"РАЗОВЫЙ ДОГОВОР"}`}
+        {signing?"Генерация...":"📄 СГЕНЕРИРОВАТЬ ГЕН.ДОГОВОР"}
       </Btn>
       <div className="mt-3 text-[10px] italic flex items-center gap-1" style={{color:B.t3}}>
         <Info size={10}/>Договор сформируется автоматически по шаблону на основе данных клиента.
       </div>
     </Card>
     {handoverModal && <HandoverModal config={handoverModal} onSkip={()=>handoverSubmit("")} onConfirm={handoverSubmit} onClose={()=>setHandoverModal(null)}/>}
+  </>;
+}
+
+// ─── RequestTaskForm — unified editable form shown above ActionBlock ───
+// Shows all relevant request data in a structured, editable layout
+// so the user sees everything at once and can make decisions fast.
+function RequestTaskForm({req, currentUser, onAction, setToast}) {
+  const stage = PIPELINE_STAGES.find(s => s.id === req.stage);
+  const roleInfo = ROLE_ACCESS[currentUser.role];
+  const isExtended = req.requestedAmount > 50000;
+  const canAct = currentUser && stage && (stage.role === currentUser.role || currentUser.role === "admin");
+
+  // Editable state
+  const [limitInput, setLimitInput] = useState(String(req.approvedLimit || req.requestedAmount || 0));
+  const [rateSelect, setRateSelect] = useState(String(req.approvedRate || 25));
+  const [termSelect, setTermSelect] = useState("90");
+  const [recommendation, setRecommendation] = useState(req.analystRecommendation || "approve");
+  const [comment, setComment] = useState("");
+  const [passToLpr, setPassToLpr] = useState(isExtended); // Always checked for >50K
+  const [signing, setSigning] = useState(false);
+  const [rejectModal, setRejectModal] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+  const [greyZoneModal, setGreyZoneModal] = useState(false);
+  const [greyZoneReason, setGreyZoneReason] = useState("");
+
+  // ─── Contract preparation state ───
+  const contractDraftKey = `contract-draft-${req.id}`;
+  const [accountNumber, setAccountNumber] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(contractDraftKey);
+      if (saved) return JSON.parse(saved).accountNumber || req.accountNumber || "";
+    } catch(e) {}
+    return req.accountNumber || "";
+  });
+  const [contractTemplate, setContractTemplate] = useState("standard"); // standard / short / extended
+  const [generating, setGenerating] = useState(false);
+  const [generationStep, setGenerationStep] = useState(0); // 0=not started, 1-4=steps, 5=done
+  const [contractNumber, setContractNumber] = useState(null);
+  const [showPreview, setShowPreview] = useState(false);
+
+  // ─── Contract signing (bank) state ───
+  const [pin, setPin] = useState("");
+  const [returnToUskoModal, setReturnToUskoModal] = useState(false);
+  const [returnIssues, setReturnIssues] = useState([]);
+  const [returnComment, setReturnComment] = useState("");
+
+  // ─── Client signing state (no extra state, just reminder toasts) ───
+
+  // ─── Grey zone state (reanimate — optional comment) ───
+  const [reanimateComment, setReanimateComment] = useState("");
+
+  // Autosave contract draft
+  useEffect(() => {
+    if (req.stage !== "contract_preparation") return;
+    if (accountNumber) {
+      try {
+        sessionStorage.setItem(contractDraftKey, JSON.stringify({accountNumber, savedAt: new Date().toISOString()}));
+      } catch(e) {}
+    }
+  }, [accountNumber, contractDraftKey, req.stage]);
+
+  // Return early for final states
+  if (req.stage === "active" || req.stage === "rejected") return null;
+  if (!canAct) return null;
+
+  // Scoring class color
+  const scoreColor = req.scoringClass === "A" || req.scoringClass === "AA" ? B.green
+    : req.scoringClass === "B" || req.scoringClass === "BB" ? B.yellow : B.red;
+
+  // Days on stage + SLA
+  const days = getDaysOnStage(req);
+  const slaLimit = getSlaLimit(req.stage, req.tier);
+  const overdue = days > slaLimit;
+  const slaRemainingText = overdue
+    ? `⚠ ПРОСРОЧЕНО на ${days - slaLimit} раб.д`
+    : `Осталось ${Math.max(0, slaLimit - days)} раб.д (SLA: ${slaLimit}д)`;
+
+  // Handler: wraps onAction with loading state
+  const doAdvance = (nextStageId, extraData = {}, message) => {
+    setSigning(true);
+    setTimeout(() => {
+      setSigning(false);
+      onAction && onAction(nextStageId, extraData, message);
+    }, 1200);
+  };
+
+  // Reject handler
+  const rejectSubmit = () => {
+    onAction && onAction("rejected", {rejectReason, rejectDate: "2026-03-26", rejectedBy: currentUser.name}, "Заявка отклонена");
+    setRejectModal(false);
+  };
+
+  // Grey zone handler
+  const greyZoneSubmit = () => {
+    onAction && onAction("grey_zone", {greyZoneReason, greyZoneBy: currentUser.name}, "Заявка перенесена в серую зону");
+    setGreyZoneModal(false);
+  };
+
+  // Click on scoring chip — open document
+  const openScoringDoc = (docType) => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent("oborotka:open-doc", {detail: {reqId: req.id, docType}}));
+  };
+
+  // Determine primary button config based on stage + role
+  let primaryAction = null;
+  if (req.stage === "analyst_verification") {
+    if (recommendation === "approve") {
+      if (isExtended) {
+        // >50K → must pass to LPR
+        primaryAction = {
+          label: signing ? "Передача..." : "✓ Верифицировать и передать на решение ЛПР",
+          icon: signing ? Loader2 : ArrowRight,
+          onClick: () => doAdvance("lpr_decision", {
+            approvedLimit: parseInt(limitInput, 10) || 0,
+            approvedRate: parseFloat(rateSelect),
+            approvedTerm: parseInt(termSelect, 10),
+            analystRecommendation: recommendation,
+            analystComment: comment,
+            verifiedBy: currentUser.name,
+          }, `Верифицировано. Передано ЛПР на решение`),
+        };
+      } else {
+        // ≤50K → analyst signs immediately
+        primaryAction = {
+          label: signing ? "Подпись..." : "✓ Одобрить и подписать ЭЦП",
+          icon: signing ? Loader2 : CheckCircle,
+          onClick: () => doAdvance("contract_preparation", {
+            approvedLimit: parseInt(limitInput, 10) || 0,
+            approvedRate: parseFloat(rateSelect),
+            approvedTerm: parseInt(termSelect, 10),
+            analystRecommendation: recommendation,
+            analystComment: comment,
+            decisionBy: currentUser.name,
+            decisionDate: "2026-03-26",
+          }, `Одобрено. Передано в УСКО на оформление договора`),
+        };
+      }
+    }
+    // reject/grey_zone rekomendation → handled by Reject/GreyZone buttons below
+  } else if (req.stage === "lpr_decision") {
+    if (recommendation === "approve") {
+      primaryAction = {
+        label: signing ? "Подпись..." : "✓ Одобрить и подписать ЭЦП",
+        icon: signing ? Loader2 : CheckCircle,
+        onClick: () => doAdvance("contract_preparation", {
+          approvedLimit: parseInt(limitInput, 10) || 0,
+          approvedRate: parseFloat(rateSelect),
+          approvedTerm: parseInt(termSelect, 10),
+          lprRecommendation: recommendation,
+          lprComment: comment,
+          decisionBy: currentUser.name,
+          decisionDate: "2026-03-26",
+        }, `ЛПР одобрил. Передано в УСКО на оформление договора`),
+      };
+    }
+  } else if (req.stage === "client_activation") {
+    primaryAction = {
+      label: signing ? "Активация..." : "⚡ АКТИВИРОВАТЬ КЛИЕНТА",
+      icon: signing ? Loader2 : CheckCircle,
+      onClick: () => doAdvance("active", {}, `🎉 Поздравляем! Клиент ${req.company} активирован и может создавать уступки`),
+    };
+  } else if (req.stage === "contract_preparation") {
+    // Contract preparation — runs generation animation + creates contract
+    const runGeneration = () => {
+      setGenerating(true);
+      setGenerationStep(1);
+      // Step 1: Fetch data from ABS (0.5s)
+      setTimeout(() => {
+        setGenerationStep(2);
+        // Step 2: Fill template (0.7s)
+        setTimeout(() => {
+          setGenerationStep(3);
+          // Step 3: Generate PDF (0.8s)
+          setTimeout(() => {
+            setGenerationStep(4);
+            // Step 4: Assign contract number (0.3s)
+            setTimeout(() => {
+              const newContractNumber = `ДФ-${new Date().getFullYear()}-${String(Math.floor(Math.random()*9000)+1000)}`;
+              setContractNumber(newContractNumber);
+              setGenerationStep(5);
+              setGenerating(false);
+              try { sessionStorage.removeItem(contractDraftKey); } catch(e) {}
+            }, 300);
+          }, 800);
+        }, 700);
+      }, 500);
+    };
+    primaryAction = {
+      label: generationStep === 5
+        ? (signing ? "Передача подписанту..." : "📤 Передать подписанту банка")
+        : (generating ? "Генерация договора..." : "🔄 Сгенерировать ген.договор"),
+      icon: generationStep === 5 ? (signing ? Loader2 : ArrowRight) : (generating ? Loader2 : FileText),
+      disabled: generationStep === 5 ? false : (!accountNumber || generating),
+      onClick: generationStep === 5
+        ? () => doAdvance("contract_signing", {accountNumber, contractNumber, contractTemplate}, `Ген.договор ${contractNumber} передан подписанту`)
+        : runGeneration,
+    };
+  } else if (req.stage === "contract_signing") {
+    // Bank signer: requires PIN to sign ECP
+    primaryAction = {
+      label: signing ? "Подписание..." : "🔏 Подписать ЭЦП банка",
+      icon: signing ? Loader2 : Pen,
+      disabled: signing || pin.length !== 4,
+      onClick: () => doAdvance("client_signing", {docs: {...req.docs, generalContract: "signed_bank"}, signedByBank: currentUser.name, signedByBankDate: "2026-03-26"}, "Договор подписан банком. Отправлен клиенту"),
+    };
+  } else if (req.stage === "client_signing") {
+    // Waiting for client — no primary action, just reminder + mock "client signed"
+    primaryAction = {
+      label: signing ? "Переход..." : "🧪 Mock: клиент подписал",
+      icon: signing ? Loader2 : CheckCircle,
+      onClick: () => doAdvance("client_activation", {docs: {...req.docs, generalContract: "signed_all"}, signedByClientDate: "2026-03-26"}, "Клиент подписал. Переход на активацию"),
+    };
+  } else if (req.stage === "grey_zone") {
+    // Grey zone — reanimate back to analyst_verification
+    if (currentUser.role === "analyst" || currentUser.role === "admin") {
+      primaryAction = {
+        label: signing ? "Возврат..." : "🔄 Реанимировать в работу",
+        icon: signing ? Loader2 : RefreshCw,
+        onClick: () => doAdvance("analyst_verification", {reanimateComment, analystTakenBy: currentUser.name, analystTakenDate: "2026-03-26"}, "Заявка реанимирована. Возвращена на верификацию аналитика"),
+      };
+    }
+  }
+
+  // No stages are delegated to ActionBlock anymore — all handled inside RequestTaskForm.
+  const delegateToActionBlock = false;
+
+  // Determine if we show the "Recommendation" block (analyst_verification / lpr_decision only)
+  const showRecommendation = req.stage === "analyst_verification" || req.stage === "lpr_decision";
+
+  // Editable limits block — only for analyst_verification / lpr_decision
+  const showEditableLimits = req.stage === "analyst_verification" || req.stage === "lpr_decision";
+
+  return <>
+    <Card className="p-5 mb-4" style={{background: roleInfo?.color + "06" || "white", borderColor: roleInfo?.color || B.accent, borderWidth: 2}}>
+      {/* ─── Header with stage + SLA badge ─── */}
+      <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b" style={{borderColor: B.border}}>
+        <div className="flex items-start gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background: "white", border: `1px solid ${roleInfo?.color || B.accent}30`}}>
+            {roleInfo?.icon || "🎯"}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: roleInfo?.color || B.accent}}>
+              Ваша задача
+            </div>
+            <div className="text-base font-bold mt-0.5" style={{color: B.t1}}>
+              {stage?.label || req.stage}
+            </div>
+            <div className="text-[10px] mt-1" style={{color: overdue ? B.red : B.t2}}>
+              {slaRemainingText}
+            </div>
+          </div>
+        </div>
+        <span className="text-[10px] font-bold px-2 py-1 rounded-lg shrink-0" style={{background: isExtended ? B.purpleL : B.accentL, color: isExtended ? B.purple : B.accent}}>
+          {isExtended ? ">50K — расширенная" : "≤50K — упрощённая"}
+        </span>
+      </div>
+
+      {/* ─── NEW request banner ─── */}
+      {req.stage === "analyst_verification" && !req.analystTakenBy && <div className="flex items-center gap-2 p-2.5 rounded-lg mb-4" style={{background: B.accentL, borderLeft: `3px solid ${B.accent}`}}>
+        <span className="text-base">📥</span>
+        <div>
+          <div className="text-xs font-bold" style={{color: B.accent}}>Новая заявка</div>
+          <div className="text-[10px]" style={{color: B.t2}}>Автоскоринг завершён, ждёт вашей проверки</div>
+        </div>
+      </div>}
+
+      {/* ─── Block: Данные клиента ─── */}
+      <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Данные клиента
+        </div>
+        <div className="grid grid-cols-4 gap-3 mb-3">
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Компания</div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>{req.company}</div>
+            <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>УНП {req.unp}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Запрашиваемая сумма</div>
+            <div className="text-sm font-black mono" style={{color: B.t1}}>{fmtByn(req.requestedAmount)}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Создана</div>
+            <div className="text-xs" style={{color: B.t1}}>{req.created}</div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t3}}>{days} раб.д на этапе</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Приоритет</div>
+            <div className="text-xs" style={{color: req.priority === "high" ? B.red : B.t1}}>
+              {req.priority === "high" ? "🔥 Высокий" : req.priority === "medium" ? "Средний" : "Низкий"}
+            </div>
+          </div>
+        </div>
+
+        {/* Editable limit / rate / term */}
+        {showEditableLimits && <div className="grid grid-cols-4 gap-3">
+          <div>
+            <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>Одобряемый лимит, BYN</label>
+            <input type="number" value={limitInput} onChange={e => setLimitInput(e.target.value)}
+              className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 mono" style={{color: B.t1}}/>
+          </div>
+          <div>
+            <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>Ставка</label>
+            <select value={rateSelect} onChange={e => setRateSelect(e.target.value)}
+              className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200" style={{color: B.t1}}>
+              <option value="20.5">20.5%</option>
+              <option value="25">25%</option>
+              <option value="30">30%</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>Срок, дней</label>
+            <select value={termSelect} onChange={e => setTermSelect(e.target.value)}
+              className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200" style={{color: B.t1}}>
+              <option value="30">30 дней</option>
+              <option value="60">60 дней</option>
+              <option value="90">90 дней</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>Чистые активы</label>
+            <div className="px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 bg-slate-50"
+              style={{color: isExtended ? (req.netAssets === "positive" ? B.green : B.red) : B.t3}}>
+              {isExtended ? (req.netAssets === "positive" ? "✓ Положительные" : "✗ Отрицательные") : "— (для ≤50K)"}
+            </div>
+          </div>
+        </div>}
+      </div>
+
+      {/* ─── Block: Скоринг ─── */}
+      <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Автоскоринг
+        </div>
+        <div className="flex items-center gap-3 p-3 rounded-xl mb-2" style={{background: scoreColor + "10"}}>
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center text-lg font-black shrink-0"
+            style={{background: "white", color: scoreColor, border: `2px solid ${scoreColor}`}}>
+            {req.scoringClass || "—"}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-bold" style={{color: scoreColor}}>
+              Результат: {req.scoringTotal || "—"} баллов из 200
+            </div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t2}}>
+              {req.scoringClass === "A" || req.scoringClass === "AA" ? "Высокий балл — можно одобрять стандартно"
+                : req.scoringClass === "B" || req.scoringClass === "BB" ? "Средний балл — проверить внимательно"
+                : "Низкий балл — требуется детальная проверка"}
+            </div>
+          </div>
+        </div>
+        {/* Clickable scoring details — click opens document */}
+        <div className="grid grid-cols-3 gap-2">
+          <button onClick={() => openScoringDoc("legat")}
+            className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
+            style={{background: req.legat === "clean" ? B.greenL + "50" : B.redL + "50"}}>
+            <span className="text-[10px] font-semibold" style={{color: B.t3}}>Легат</span>
+            <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.legat === "clean" ? B.green : B.red}}>
+              {req.legat === "clean" ? "✓ Чисто" : "✗ Записи"}
+              <ExternalLink size={10}/>
+            </span>
+          </button>
+          <button onClick={() => openScoringDoc("bki")}
+            className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
+            style={{background: req.bki === "good" ? B.greenL + "50" : B.redL + "50"}}>
+            <span className="text-[10px] font-semibold" style={{color: B.t3}}>БКИ</span>
+            <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.bki === "good" ? B.green : B.red}}>
+              {req.bki === "good" ? "✓ Хорошая" : "✗ Проблемы"}
+              <ExternalLink size={10}/>
+            </span>
+          </button>
+          {isExtended && <button onClick={() => openScoringDoc("report")}
+            className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
+            style={{background: req.netAssets === "positive" ? B.greenL + "50" : B.redL + "50"}}>
+            <span className="text-[10px] font-semibold" style={{color: B.t3}}>Отчётность</span>
+            <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.netAssets === "positive" ? B.green : B.red}}>
+              {req.netAssets === "positive" ? "✓ Чистые активы +" : "✗ Активы −"}
+              <ExternalLink size={10}/>
+            </span>
+          </button>}
+        </div>
+      </div>
+
+      {/* ─── Block: Подготовка договора (только для contract_preparation) ─── */}
+      {req.stage === "contract_preparation" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Генерация ген.договора факторинга
+        </div>
+
+        {/* Approved decision summary */}
+        <div className="p-3 rounded-xl mb-3" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
+          <div className="flex items-center gap-2 mb-1">
+            <CheckCircle size={12} style={{color: B.green}}/>
+            <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.green}}>
+              Решение по заявке одобрено
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-[11px] mt-1">
+            <div><span style={{color: B.t3}}>Лимит:</span> <strong className="mono" style={{color: B.t1}}>{fmtByn(req.approvedLimit || 0)}</strong></div>
+            <div><span style={{color: B.t3}}>Ставка:</span> <strong className="mono" style={{color: B.t1}}>{req.approvedRate || 25}%</strong></div>
+            <div><span style={{color: B.t3}}>Решил:</span> <strong style={{color: B.t1}}>{req.decisionBy || "—"}</strong></div>
+          </div>
+        </div>
+
+        {generationStep < 5 && <>
+          {/* Step 1: account number + template */}
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
+                Номер счёта в АБС банка <span style={{color: B.red}}>*</span>
+              </label>
+              <input value={accountNumber} onChange={e => setAccountNumber(e.target.value)}
+                disabled={generating}
+                placeholder="3819000012345"
+                className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 mono"
+                style={{color: B.t1, background: generating ? "#F8FAFC" : "white"}}/>
+              <div className="text-[9px] mt-1" style={{color: B.t3}}>
+                Получите в АБС после заведения карточки клиента
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>Шаблон договора</label>
+              <select value={contractTemplate} onChange={e => setContractTemplate(e.target.value)}
+                disabled={generating}
+                className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200"
+                style={{color: B.t1, background: generating ? "#F8FAFC" : "white"}}>
+                <option value="standard">Стандартный (2026)</option>
+                <option value="short">Короткий (для &lt;100К)</option>
+                <option value="extended">Расширенный (с доп.условиями)</option>
+              </select>
+              <div className="text-[9px] mt-1" style={{color: B.t3}}>
+                Большинство случаев — стандартный шаблон
+              </div>
+            </div>
+          </div>
+
+          {/* Generation progress steps */}
+          {generating && <div className="p-3 rounded-xl mb-3" style={{background: B.accentL + "40", borderLeft: `3px solid ${B.accent}`}}>
+            <div className="text-[10px] font-bold mb-2" style={{color: B.accent}}>Платформа генерирует договор...</div>
+            <div className="space-y-1.5">
+              {[
+                {step: 1, label: "Загрузка данных клиента из АБС"},
+                {step: 2, label: "Заполнение шаблона договора"},
+                {step: 3, label: "Генерация PDF-файла"},
+                {step: 4, label: "Присвоение номера договора"},
+              ].map(s => <div key={s.step} className="flex items-center gap-2 text-[11px]">
+                {generationStep > s.step
+                  ? <CheckCircle size={12} style={{color: B.green}}/>
+                  : generationStep === s.step
+                    ? <Loader2 size={12} style={{color: B.accent}} className="animate-spin"/>
+                    : <div className="w-3 h-3 rounded-full border" style={{borderColor: B.border}}/>}
+                <span style={{color: generationStep >= s.step ? B.t1 : B.t3, fontWeight: generationStep === s.step ? 600 : 400}}>
+                  {s.label}
+                </span>
+              </div>)}
+            </div>
+          </div>}
+
+          {/* What will happen explainer */}
+          {!generating && <div className="text-[10px] p-2.5 rounded-lg mb-3" style={{background: "#F8FAFC", color: B.t2}}>
+            <strong style={{color: B.t1}}>Что произойдёт при генерации:</strong>
+            <ul className="mt-1 space-y-0.5 ml-4 list-disc">
+              <li>Платформа вытянет данные клиента из АБС по номеру счёта</li>
+              <li>Заполнит выбранный шаблон суммой лимита {fmtByn(req.approvedLimit || 0)}, ставкой {req.approvedRate || 25}% и параметрами клиента</li>
+              <li>Сформирует PDF-файл договора и присвоит уникальный номер</li>
+              <li>Договор попадёт в очередь подписанту банка на подпись ЭЦП</li>
+            </ul>
+          </div>}
+        </>}
+
+        {/* Generated contract preview */}
+        {generationStep === 5 && contractNumber && <div className="p-4 rounded-xl mb-3" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+              <FileText size={20} style={{color: B.green}}/>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: B.green}}>✓ Договор сгенерирован</div>
+              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
+                Генеральный договор факторинга <span className="mono">№{contractNumber}</span>
+              </div>
+              <div className="text-[10px] mt-1" style={{color: B.t2}}>
+                Клиент: {req.company} · Лимит: {fmtByn(req.approvedLimit || 0)} · Счёт: <span className="mono">{accountNumber}</span>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <button onClick={() => setShowPreview(true)}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Eye size={11}/> Открыть превью
+                </button>
+                <span style={{color: B.t3}}>·</span>
+                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Download size={11}/> Скачать PDF
+                </button>
+                <span style={{color: B.t3}}>·</span>
+                <button onClick={() => {setGenerationStep(0); setContractNumber(null);}}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.t2}}>
+                  <RefreshCw size={11}/> Перегенерировать
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>}
+      </div>}
+
+      {/* ─── Block: Подписание банком (contract_signing) ─── */}
+      {req.stage === "contract_signing" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Подписание ген.договора ЭЦП банка
+        </div>
+
+        {/* Contract info card */}
+        <div className="p-4 rounded-xl mb-3" style={{background: "#ECFEFF", borderLeft: `3px solid #06B6D4`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+              <FileText size={20} style={{color: "#06B6D4"}}/>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: "#06B6D4"}}>Договор готов к подписи</div>
+              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
+                Генеральный договор факторинга {req.contractNumber && <span className="mono">№{req.contractNumber}</span>}
+              </div>
+              <div className="text-[10px] mt-1" style={{color: B.t2}}>
+                Клиент: <strong>{req.company}</strong> · Лимит: <strong className="mono">{fmtByn(req.approvedLimit || 0)}</strong> · Счёт: <span className="mono">{req.accountNumber || "—"}</span>
+              </div>
+              <div className="text-[10px] mt-1" style={{color: B.t3}}>
+                Подготовил: {req.preparedBy || "УСКО"}
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <button onClick={() => setShowPreview(true)}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Eye size={11}/> Открыть превью
+                </button>
+                <span style={{color: B.t3}}>·</span>
+                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Download size={11}/> Скачать PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* PIN input for ECP signature */}
+        <div className="mb-3">
+          <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
+            PIN-код ЭЦП банка <span style={{color: B.red}}>*</span>
+          </label>
+          <input type="password" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            placeholder="••••"
+            maxLength={4}
+            className="w-full px-3 py-2 text-lg rounded-lg border border-slate-200 mono text-center tracking-widest"
+            style={{color: B.t1, letterSpacing: "0.5em"}}/>
+          <div className="text-[9px] mt-1" style={{color: B.t3}}>
+            4 цифры. Демо-режим: любые 4 цифры подойдут.
+          </div>
+        </div>
+
+        {/* Return to USKO link */}
+        <div className="flex items-center justify-center pb-2 border-b mb-2" style={{borderColor: B.border}}>
+          <button onClick={() => {setReturnIssues([]); setReturnComment(""); setReturnToUskoModal(true);}}
+            className="text-[11px] font-semibold hover:underline flex items-center gap-1" style={{color: B.red}}>
+            ↩ Вернуть УСКО на доработку
+          </button>
+        </div>
+
+        <div className="text-[10px] italic flex items-center gap-1" style={{color: B.t3}}>
+          <Info size={10}/>Ваша ЭЦП → договор уйдёт клиенту. Если в договоре ошибка — верните на доработку.
+        </div>
+      </div>}
+
+      {/* ─── Block: Ожидание клиента (client_signing) ─── */}
+      {req.stage === "client_signing" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Ожидание подписи клиента
+        </div>
+
+        <div className="p-4 rounded-xl mb-3" style={{background: "#F0F9FF", borderLeft: `3px solid #0891B2`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 text-2xl" style={{background: "white"}}>
+              ⏳
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: "#0891B2"}}>Клиент подписывает договор</div>
+              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
+                Договор отправлен в личный кабинет клиента
+              </div>
+              <div className="text-[11px] mt-1" style={{color: B.t2}}>
+                <strong>{req.company}</strong> должен подписать ген.договор ЭЦП в своём кабинете.
+                Платформа автоматически продвинет этап вперёд после подписи.
+              </div>
+              {req.signedByBankDate && <div className="text-[10px] mt-2" style={{color: B.t3}}>
+                Банк подписал: {req.signedByBankDate} · {req.signedByBank || "—"}
+              </div>}
+            </div>
+          </div>
+        </div>
+
+        {/* Reminder action */}
+        <div className="flex gap-2 mb-2">
+          <Btn size="sm" variant="ghost" icon={Mail} className="flex-1"
+            onClick={() => setToast && setToast({msg: "Напоминание отправлено клиенту на email", type: "info"})}>
+            Напомнить на email
+          </Btn>
+          <Btn size="sm" variant="ghost" icon={Bell} className="flex-1"
+            onClick={() => setToast && setToast({msg: "SMS-напоминание отправлено", type: "info"})}>
+            SMS-напоминание
+          </Btn>
+        </div>
+
+        <div className="text-[10px] italic flex items-center gap-1" style={{color: B.t3}}>
+          <Info size={10}/>Клиент подписывает в своём кабинете. Ниже — mock-кнопка для демо.
+        </div>
+      </div>}
+
+      {/* ─── Block: Серая зона (grey_zone) ─── */}
+      {req.stage === "grey_zone" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Пограничный случай — ручное рассмотрение
+        </div>
+
+        <div className="p-4 rounded-xl mb-3" style={{background: "#F3F4F6", borderLeft: `3px solid #6B7280`}}>
+          <div className="flex items-start gap-3">
+            <AlertCircle size={22} style={{color: "#6B7280"}} className="shrink-0 mt-0.5"/>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: "#6B7280"}}>⚪ Серая зона — пограничный клиент</div>
+              <div className="text-sm font-bold mt-1" style={{color: B.t1}}>
+                Балл скоринга {req.scoringTotal || "—"}/200
+              </div>
+              <div className="text-[11px] mt-1" style={{color: B.t2}}>
+                Автоскоринг не пропустил заявку — требует ручного рассмотрения. Вы можете реанимировать заявку
+                (вернуть на верификацию аналитика) либо окончательно отклонить.
+              </div>
+              {req.greyZoneReason && <div className="mt-2 p-2 rounded-lg text-[11px] italic" style={{background: "white", color: B.t2}}>
+                💬 «{req.greyZoneReason}»
+              </div>}
+            </div>
+          </div>
+        </div>
+
+        {/* Optional reanimate comment */}
+        <div className="mb-3">
+          <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
+            Комментарий при реанимации (необязательно)
+          </label>
+          <textarea value={reanimateComment} onChange={e => setReanimateComment(e.target.value)} rows={2}
+            placeholder="Например: «Клиент донёс дополнительные документы, пересматриваем»"
+            className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200" style={{color: B.t1}}/>
+        </div>
+      </div>}
+
+      {/* ─── Block: Рекомендация (только для analyst_verification / lpr_decision) ─── */}
+      {showRecommendation && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Решение
+        </div>
+        <div className="flex items-center gap-2 mb-2">
+          {[
+            {id: "approve", label: "✓ Одобрить", color: B.green, bg: B.greenL},
+            {id: "reject", label: "✗ Отклонить", color: B.red, bg: B.redL},
+            {id: "grey_zone", label: "⚪ В серую зону", color: "#6B7280", bg: "#F3F4F6"},
+          ].map(opt => <button key={opt.id} onClick={() => setRecommendation(opt.id)}
+            className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold border transition-all"
+            style={recommendation === opt.id
+              ? {background: opt.bg, color: opt.color, borderColor: opt.color, borderWidth: 2}
+              : {background: "white", color: B.t2, borderColor: B.border}}>
+            {opt.label}
+          </button>)}
+        </div>
+        <textarea value={comment} onChange={e => setComment(e.target.value)} rows={2}
+          placeholder={recommendation === "approve" ? "Комментарий (опционально)" : "Обоснование (обязательно)"}
+          className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200"
+          style={{color: B.t1}}/>
+
+        {/* LPR checkbox (only for >50K at analyst_verification stage) */}
+        {req.stage === "analyst_verification" && isExtended && <div className="mt-2 p-2.5 rounded-lg" style={{background: B.purpleL + "50"}}>
+          <label className="flex items-center gap-2 cursor-not-allowed">
+            <input type="checkbox" checked={passToLpr} disabled
+              className="w-4 h-4"/>
+            <span className="text-[11px] font-semibold" style={{color: B.purple}}>
+              Передать ЛПР на решение (обязательно для сумм &gt;50K)
+            </span>
+          </label>
+        </div>}
+      </div>}
+
+      {/* ─── Footer: primary action ─── */}
+      {!delegateToActionBlock && <div className="pt-3 border-t" style={{borderColor: B.border}}>
+        {/* Primary action — either gated by recommendation (for analyst/lpr) or direct (for contract_prep/activation) */}
+        {primaryAction && (!showRecommendation || recommendation === "approve") && <Btn size="lg" icon={primaryAction.icon}
+          disabled={primaryAction.disabled != null ? primaryAction.disabled : signing}
+          className="w-full"
+          onClick={primaryAction.onClick}>
+          {primaryAction.label}
+        </Btn>}
+        {recommendation === "reject" && showRecommendation && <Btn size="lg" variant="danger" icon={XCircle} disabled={signing || !comment.trim()} className="w-full"
+          onClick={() => {setRejectReason(comment); rejectSubmit();}}>
+          ✗ Отклонить заявку
+        </Btn>}
+        {recommendation === "grey_zone" && showRecommendation && <Btn size="lg" variant="secondary" icon={AlertCircle} disabled={signing || !comment.trim()} className="w-full"
+          onClick={() => {setGreyZoneReason(comment); greyZoneSubmit();}}>
+          ⚪ Перенести в серую зону
+        </Btn>}
+
+        {/* Secondary reject link (always available) */}
+        {(currentUser.role === "analyst" || currentUser.role === "lpr" || currentUser.role === "admin") && recommendation === "approve" && <div className="flex items-center justify-center mt-3">
+          <button onClick={() => setRejectModal(true)}
+            className="text-[11px] hover:underline" style={{color: B.red}}>
+            ✗ Отклонить заявку
+          </button>
+        </div>}
+      </div>}
+
+      {/* Delegation notice for complex stages */}
+      {delegateToActionBlock && <div className="pt-3 border-t text-[10px]" style={{borderColor: B.border, color: B.t3}}>
+        <Info size={10} className="inline mr-1"/>
+        Действия для этапа «{stage?.label}» → см. блок ниже
+      </div>}
+    </Card>
+
+    {/* Reject modal */}
+    <Modal open={rejectModal} onClose={() => setRejectModal(false)} title="Отклонить заявку">
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs font-medium mb-1 block" style={{color: B.t2}}>Причина отклонения</label>
+          <textarea value={rejectReason} onChange={e => setRejectReason(e.target.value)} rows={3}
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" placeholder="Например: клиент в стоп-листе, данные неактуальны..." style={{color: B.t1}}/>
+        </div>
+        <Btn variant="danger" onClick={rejectSubmit} icon={XCircle} className="w-full" disabled={!rejectReason.trim()}>
+          Подтвердить отклонение
+        </Btn>
+      </div>
+    </Modal>
+
+    {/* Grey zone modal */}
+    <Modal open={greyZoneModal} onClose={() => setGreyZoneModal(false)} title="Перенести в серую зону">
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs font-medium mb-1 block" style={{color: B.t2}}>Причина переноса</label>
+          <textarea value={greyZoneReason} onChange={e => setGreyZoneReason(e.target.value)} rows={3}
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" placeholder="Описание пограничной ситуации..." style={{color: B.t1}}/>
+        </div>
+        <Btn variant="secondary" onClick={greyZoneSubmit} icon={AlertCircle} className="w-full" disabled={!greyZoneReason.trim()}>
+          Подтвердить перенос
+        </Btn>
+      </div>
+    </Modal>
+
+    {/* Contract preview modal */}
+    <Modal open={showPreview} onClose={() => setShowPreview(false)} title={`Превью: Генеральный договор №${contractNumber || "—"}`}>
+      <div className="space-y-3">
+        <div className="p-4 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`, fontFamily: "serif"}}>
+          <div className="text-center mb-3">
+            <div className="text-sm font-bold" style={{color: B.t1}}>ГЕНЕРАЛЬНЫЙ ДОГОВОР ФАКТОРИНГА</div>
+            <div className="text-[11px] mono mt-1" style={{color: B.t2}}>№ {contractNumber} от 26.03.2026</div>
+          </div>
+          <div className="text-[11px] leading-relaxed space-y-2" style={{color: B.t2}}>
+            <p><strong>ОАО «Банк Оборотка»</strong> (Фактор), именуемое в дальнейшем «Банк», в лице Председателя Правления, действующего на основании Устава, с одной стороны,</p>
+            <p>и <strong>{req.company}</strong> (УНП {req.unp}), именуемое в дальнейшем «Клиент», в лице директора, с другой стороны,</p>
+            <p className="pt-2">заключили настоящий Договор о нижеследующем:</p>
+            <p><strong>1. ПРЕДМЕТ ДОГОВОРА.</strong> Банк обязуется предоставить Клиенту услуги факторинга (финансирование под уступку денежного требования) в пределах установленного лимита.</p>
+            <p><strong>2. ФИНАНСОВЫЕ УСЛОВИЯ.</strong></p>
+            <p className="pl-4">2.1. Общий лимит финансирования: <strong className="mono">{fmtByn(req.approvedLimit || 0)}</strong></p>
+            <p className="pl-4">2.2. Ставка дисконта: <strong className="mono">{req.approvedRate || 25}%</strong> годовых</p>
+            <p className="pl-4">2.3. Расчётный счёт клиента в АБС: <strong className="mono">{accountNumber}</strong></p>
+            <p><strong>3. ПОРЯДОК УСТУПКИ.</strong> Клиент вправе уступать Банку денежные требования к своим должникам в пределах лимита. Каждая уступка оформляется допсоглашением (ДС).</p>
+            <p className="pt-3 text-center italic" style={{color: B.t3}}>— превью сокращено, полный текст договора в PDF —</p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setShowPreview(false)} className="flex-1">Закрыть</Btn>
+          <Btn variant="secondary" icon={Download} onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})} className="flex-1">Скачать PDF</Btn>
+        </div>
+      </div>
+    </Modal>
+
+    {/* Return-to-USKO modal (contract_signing stage) */}
+    <Modal open={returnToUskoModal} onClose={() => setReturnToUskoModal(false)} title="Вернуть на доработку УСКО">
+      <div className="space-y-4">
+        <div className="p-3 rounded-xl" style={{background: "#F8FAFC"}}>
+          <div className="text-[10px] font-semibold mb-1" style={{color: B.t3}}>Заявка вернётся на этап «Подготовка договора»</div>
+          <div className="text-xs font-bold" style={{color: B.t1}}>УСКО-специалист</div>
+          <div className="text-[10px]" style={{color: B.orange}}>📄 УСКО — оформление договоров</div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-2 block" style={{color: B.t2}}>Что нужно исправить? (выберите проблемы)</label>
+          <div className="space-y-1.5">
+            {typeof RETURN_ISSUE_LABELS !== "undefined" && Object.entries(RETURN_ISSUE_LABELS).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-slate-50">
+                <input type="checkbox" checked={returnIssues.includes(key)} onChange={e => {
+                  setReturnIssues(prev => e.target.checked ? [...prev, key] : prev.filter(x => x !== key));
+                }}/>
+                <span className="text-xs" style={{color: B.t1}}>{label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block" style={{color: B.t2}}>Комментарий (обязательно)</label>
+          <textarea value={returnComment} onChange={e => setReturnComment(e.target.value)} rows={2}
+            placeholder="Например: «Сумма в договоре 180K, а лимит 150K»"
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" style={{color: B.t1}}/>
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setReturnToUskoModal(false)} className="flex-1">Отмена</Btn>
+          <Btn variant="danger" icon={XCircle} className="flex-1"
+            disabled={returnIssues.length === 0 || !returnComment.trim()}
+            onClick={() => {
+              onAction && onAction("contract_preparation", {_returnIssues: returnIssues, _returnComment: returnComment}, "Возвращено УСКО на доработку");
+              setReturnToUskoModal(false);
+            }}>
+            Вернуть на доработку
+          </Btn>
+        </div>
+      </div>
+    </Modal>
   </>;
 }
 
@@ -4330,7 +5368,6 @@ function ActionBlock({req, currentUser, onAction, setToast}) {
   const [handoverModal, setHandoverModal] = useState(null); // {action, nextStage, fields}
   const [isDataVerified, setIsDataVerified] = useState(false);
   const [analystRecommendation, setAnalystRecommendation] = useState("approve");
-  const [contractType, setContractType] = useState(req.contractType||"general");
   const [returnToUskoModal, setReturnToUskoModal] = useState(false);
   const [returnIssues, setReturnIssues] = useState([]);
   const [returnComment, setReturnComment] = useState("");
@@ -4384,99 +5421,6 @@ function ActionBlock({req, currentUser, onAction, setToast}) {
     doAdvance(cfg.nextStage, {...cfg.extraData, _handoverComment:comment}, cfg.message);
     setHandoverModal(null);
   };
-
-  // ─── scoring_received: аналитик берёт в работу ───
-  if (req.stage === "scoring_received") {
-    if (currentUser.role !== "analyst" && currentUser.role !== "admin") return null;
-    const scoreColor = req.scoringClass === "A" || req.scoringClass === "AA" ? B.green
-      : req.scoringClass === "B" || req.scoringClass === "BB" ? B.yellow : B.red;
-    const scoreBg = req.scoringClass === "A" || req.scoringClass === "AA" ? B.greenL
-      : req.scoringClass === "B" || req.scoringClass === "BB" ? B.yellowL : B.redL;
-    const daysSinceSubmit = getDaysOnStage(req);
-    const isUrgent = daysSinceSubmit >= 1;
-
-    return <>
-      <Card className="p-5 mb-5" style={{background:roleInfo.color+"08", borderColor:roleInfo.color, borderWidth:2}}>
-        <div className="flex items-start gap-3 mb-4">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background:"white"}}>📥</div>
-          <div className="flex-1 min-w-0">
-            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color:roleInfo.color}}>Новая заявка в очереди</div>
-            <div className="text-base font-bold mt-0.5" style={{color:B.t1}}>Взять заявку в работу</div>
-            <div className="text-xs mt-1" style={{color:B.t2}}>
-              Автоскоринг завершён. {isExtended ? "Требуется расширенная верификация (сумма > 50K)." : "Сумма ≤ 50K — облегчённая верификация."}
-            </div>
-          </div>
-          {/* SLA urgency badge */}
-          <div className="shrink-0 px-2.5 py-1 rounded-lg text-[10px] font-bold"
-            style={{background: isUrgent ? B.red : B.yellowL, color: isUrgent ? "white" : B.yellow}}>
-            {isUrgent ? `⚠ ПРОСРОЧЕНО (${daysSinceSubmit} раб.д)` : "SLA: 1 раб.день"}
-          </div>
-        </div>
-
-        {/* Scoring result summary */}
-        <div className="p-3 rounded-xl mb-3" style={{background: scoreBg}}>
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-xl flex items-center justify-center text-lg font-black shrink-0"
-              style={{background: "white", color: scoreColor, border: `2px solid ${scoreColor}`}}>
-              {req.scoringClass || "—"}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-bold" style={{color: scoreColor}}>
-                Результат автоскоринга: {req.scoringTotal || "—"} баллов
-              </div>
-              <div className="text-[10px] mt-0.5" style={{color: B.t2}}>
-                {req.scoringClass === "A" || req.scoringClass === "AA" ? "Высокий балл — можно одобрять стандартно."
-                  : req.scoringClass === "B" || req.scoringClass === "BB" ? "Средний балл — проверить внимательно."
-                  : "Низкий балл — требуется детальная проверка."}
-              </div>
-            </div>
-          </div>
-          <div className="grid grid-cols-3 gap-3 mt-3 text-[10px]">
-            <div>
-              <span style={{color:B.t3}}>Легат:</span>{" "}
-              <strong style={{color: req.legat === "clean" ? B.green : B.red}}>
-                {req.legat === "clean" ? "✓ Чисто" : "✗ Есть записи"}
-              </strong>
-            </div>
-            <div>
-              <span style={{color:B.t3}}>БКИ:</span>{" "}
-              <strong style={{color: req.bki === "good" ? B.green : B.red}}>
-                {req.bki === "good" ? "✓ Хорошая" : "✗ Проблемы"}
-              </strong>
-            </div>
-            {isExtended && <div>
-              <span style={{color:B.t3}}>Чистые активы:</span>{" "}
-              <strong style={{color: req.netAssets === "positive" ? B.green : B.red}}>
-                {req.netAssets === "positive" ? "✓ Положительные" : "✗ Отрицательные"}
-              </strong>
-            </div>}
-          </div>
-        </div>
-
-        {/* Primary action */}
-        <div className="space-y-2">
-          <Btn size="lg" icon={signing ? Loader2 : ArrowRight} disabled={signing} className="w-full"
-            onClick={()=>doAdvance("analyst_verification", {analystTakenBy: currentUser.name, analystTakenDate: "2026-03-26"}, `Заявка взята в работу. Ответственный: ${currentUser.name}`)}>
-            {signing ? "Беру в работу..." : "📥 Взять в работу"}
-          </Btn>
-          <div className="flex items-center gap-3 justify-center mt-3 pt-3 border-t" style={{borderColor:B.border}}>
-            <button onClick={()=>setRejectModal(true)}
-              className="text-[11px] hover:underline" style={{color:B.red}}>
-              ✗ Отклонить без проверки
-            </button>
-          </div>
-        </div>
-      </Card>
-
-      <Modal open={rejectModal} onClose={()=>setRejectModal(false)} title="Отклонить заявку">
-        <div className="space-y-4">
-          <div><label className="text-xs font-medium mb-1 block" style={{color:B.t2}}>Причина отклонения</label>
-          <textarea value={rejectReason} onChange={e=>setRejectReason(e.target.value)} rows={3} className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" placeholder="Например: клиент в стоп-листе, данные неактуальны..." style={{color:B.t1}}/></div>
-          <Btn variant="danger" onClick={rejectSubmit} icon={XCircle} className="w-full" disabled={!rejectReason.trim()}>Подтвердить отклонение</Btn>
-        </div>
-      </Modal>
-    </>;
-  }
 
   // ─── analyst_verification ≤50K: одобрить + ЭЦП ───
   if (req.stage === "analyst_verification" && !isExtended) {
@@ -4716,8 +5660,6 @@ function ActionBlock({req, currentUser, onAction, setToast}) {
       returnEvent={returnEvent}
       accountInput={accountInput}
       setAccountInput={setAccountInput}
-      contractType={contractType}
-      setContractType={setContractType}
       signing={signing}
       setHandoverModal={setHandoverModal}
       handoverModal={handoverModal}
@@ -4742,8 +5684,8 @@ function ActionBlock({req, currentUser, onAction, setToast}) {
           <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background:"white"}}>🎯</div>
           <div className="flex-1 min-w-0">
             <div className="text-[10px] font-bold uppercase tracking-wider" style={{color:roleInfo.color}}>Ваша задача</div>
-            <div className="text-base font-bold mt-0.5" style={{color:B.t1}}>Подписать {req.contractType==="onetime"?"разовый договор":"ген.договор"} ЭЦП банка</div>
-            <div className="text-xs mt-1" style={{color:B.t2}}>{req.contractType==="onetime"?"Разовый договор":"Ген.договор факторинга"} сформирован УСКО для клиента {req.company}</div>
+            <div className="text-base font-bold mt-0.5" style={{color:B.t1}}>Подписать ген.договор ЭЦП банка</div>
+            <div className="text-xs mt-1" style={{color:B.t2}}>Ген.договор факторинга сформирован УСКО для клиента {req.company}</div>
           </div>
         </div>
         <div className="space-y-2">
@@ -4815,7 +5757,7 @@ function ActionBlock({req, currentUser, onAction, setToast}) {
       </div>
       <div className="space-y-2">
         <Btn size="sm" variant="ghost" className="w-full" onClick={()=>setToast({msg:"Напоминание отправлено клиенту",type:"info"})}>📧 Отправить напоминание клиенту</Btn>
-        <Btn size="sm" variant="secondary" className="w-full" onClick={()=>doAdvance("deal_activation", {docs:{...req.docs, generalContract:"signed_all"}}, "Клиент подписал (mock). Переход на активацию")}>
+        <Btn size="sm" variant="secondary" className="w-full" onClick={()=>doAdvance("client_activation", {docs:{...req.docs, generalContract:"signed_all"}}, "Клиент подписал (mock). Переход на активацию")}>
           🧪 Mock: клиент подписал
         </Btn>
       </div>
@@ -4825,23 +5767,32 @@ function ActionBlock({req, currentUser, onAction, setToast}) {
     </Card>;
   }
 
-  // ─── deal_activation ───
-  if (req.stage === "deal_activation") {
+  // ─── client_activation ───
+  if (req.stage === "client_activation") {
     return <Card className="p-5 mb-5" style={{background:roleInfo.color+"08", borderColor:roleInfo.color, borderWidth:2}}>
       <div className="flex items-start gap-3 mb-4">
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background:"white"}}>🎯</div>
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background:"white"}}>🎉</div>
         <div className="flex-1 min-w-0">
           <div className="text-[10px] font-bold uppercase tracking-wider" style={{color:roleInfo.color}}>Ваша задача</div>
-          <div className="text-base font-bold mt-0.5" style={{color:B.t1}}>Активировать сделку в АБС</div>
-          <div className="text-xs mt-1" style={{color:B.t2}}>Все стороны подписали ген.договор. Клиент {req.company} готов подавать уступки.</div>
+          <div className="text-base font-bold mt-0.5" style={{color:B.t1}}>Активировать клиента</div>
+          <div className="text-xs mt-1" style={{color:B.t2}}>
+            Все стороны подписали ген.договор факторинга. После активации <strong>{req.company}</strong> получит
+            доступ к созданию уступок в своём кабинете.
+          </div>
         </div>
       </div>
-      <div className="text-[10px] p-2 rounded-lg bg-slate-50 mb-3" style={{color:B.t3}}>
-        <strong>Шаги:</strong> 1) Откройте АБС → 2) Сделайте сделку активной → 3) Нажмите кнопку ниже для фиксации
+      <div className="text-[10px] p-3 rounded-lg mb-3" style={{background: B.greenL, color: B.t2}}>
+        <strong style={{color: B.green}}>Что произойдёт после активации:</strong>
+        <ul className="mt-1.5 space-y-0.5 ml-4 list-disc">
+          <li>Статус клиента в АБС → «Активный»</li>
+          <li>Клиент увидит: <em>«Поздравляем! Вы теперь можете создавать уступки»</em></li>
+          <li>В модуле «Клиенты» клиент появится в табе «Активные»</li>
+          <li>Клиент сможет загружать ДКП/ТТН для уступок по своему лимиту</li>
+        </ul>
       </div>
       <Btn size="md" icon={signing?Loader2:CheckCircle} disabled={signing} className="w-full"
-        onClick={()=>doAdvance("active", {}, "Сделка активирована в АБС. Клиент может подавать уступки")}>
-        {signing?"Активация...":"⚡ АКТИВИРОВАТЬ СДЕЛКУ"}
+        onClick={()=>doAdvance("active", {}, `🎉 Поздравляем! Клиент ${req.company} активирован и может создавать уступки`)}>
+        {signing?"Активация...":"⚡ АКТИВИРОВАТЬ КЛИЕНТА"}
       </Btn>
     </Card>;
   }
@@ -4893,7 +5844,7 @@ function HistoryTimeline({history, currentStage}) {
     contract_generated: "Ген.договор сформирован",
     contract_signed_bank: "Договор подписан банком",
     contract_signed_client: "Договор подписан клиентом",
-    activated: "Сделка активирована",
+    activated: "Клиент активирован, может создавать уступки",
     rejected: "Отклонено",
     moved_to_grey: "Перенесено в серую зону",
   };
@@ -5109,6 +6060,18 @@ function PipelineDetailView({req, currentUser, pipelineData, setPipelineData, on
   const [newComment, setNewComment] = useState("");
   const canAct = canActOnStage(currentUser, req.stage);
 
+  // Implicit take: when analyst (or admin) opens a new analyst_verification task,
+  // automatically mark it as taken. Removes need for a separate "Взять в работу" button.
+  useEffect(() => {
+    if (!setPipelineData) return;
+    if (req.stage !== "analyst_verification") return;
+    if (req.analystTakenBy) return;
+    if (currentUser.role !== "analyst" && currentUser.role !== "admin") return;
+    setPipelineData(prev => prev.map(p => p.id === req.id
+      ? {...p, analystTakenBy: currentUser.name, analystTakenDate: "2026-03-26"}
+      : p));
+  }, [req.id, req.stage, req.analystTakenBy, currentUser.role, currentUser.name, setPipelineData]);
+
   const addComment = (text) => {
     if(!text?.trim()) return;
     const c = {user: currentUser.name, date:"2026-03-26", text};
@@ -5132,7 +6095,7 @@ function PipelineDetailView({req, currentUser, pipelineData, setPipelineData, on
       lpr_decision:"verified",
       contract_signing:"contract_generated",
       client_signing:"contract_signed_bank",
-      deal_activation:"contract_signed_client",
+      client_activation:"contract_signed_client",
       active:"activated",
       grey_zone:"moved_to_grey",
       rejected:"rejected",
@@ -5164,17 +6127,15 @@ function PipelineDetailView({req, currentUser, pipelineData, setPipelineData, on
   const mainDataOnLeft = canAct || req.stage==="active" || req.stage==="rejected" || req.stage==="grey_zone";
 
   return <div>
-    <PageHeader title={`Заявка ${req.id}`} breadcrumbs={["Конвейер", req.id]} onBack={onBack}
+    <PageHeader title={`Заявка ${req.id}`} subtitle={req.company} breadcrumbs={["Конвейер", req.id]} onBack={onBack}
       actions={<div className="flex items-center gap-2 flex-wrap">
         {tierInfo && <span className="px-2 py-1 rounded-lg text-[10px] font-bold" style={{background:tierInfo.color+"15", color:tierInfo.color}}>{tierInfo.full}</span>}
         <StatusBadge status={req.stage} size="md"/>
       </div>}/>
 
-    {/* ACTION BLOCK or INFORMATIONAL BANNER (top priority) */}
-    {canAct && req.stage!=="active" && req.stage!=="rejected"
-      ? <ActionBlock req={req} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>
-      : <InformationalBanner req={req} currentUser={currentUser}/>
-    }
+    {/* TASK FORM — unified form for all stages (analyst/lpr/usko/signer/client_activation) */}
+    {canAct && req.stage!=="active" && req.stage!=="rejected" && <RequestTaskForm req={req} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>}
+    {(!canAct || req.stage==="active" || req.stage==="rejected") && <InformationalBanner req={req} currentUser={currentUser}/>}
 
     {/* Compact workflow */}
     {req.stage!=="rejected" && req.stage!=="grey_zone" && <CompactWorkflow req={req} defaultExpanded={currentUser?.role === "admin"}/>}
@@ -5271,6 +6232,201 @@ const ASSIGNMENT_ACTION_LABELS = {
 
 // Badge for priority/waiting on assignment card
 // ─── ASSIGNMENTS UX REDESIGN: Table View ───
+// ─── AssignmentWorkflowHealthBanner: funnel visualization for assignments ───
+// Mirrors WorkflowHealthBanner's pattern: 4 phase cards with chevron arrows,
+// expand on click to show micro-stages. Shows load indicators (empty/normal/overload)
+// and overdue counts.
+function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePhase, onStageClick, activeStage}) {
+  const OVERLOAD_THRESHOLD = 5;
+
+  const [expanded, setExpanded] = usePersistedState("assignments-funnel-expanded", false, v => v === true || v === false || v === "true" || v === "false");
+  const expandedBool = typeof expanded === "string" ? expanded === "true" : expanded;
+  const setExpandedBool = (v) => setExpanded(Boolean(v));
+
+  // Exclude final state "paid" and error state "returned_to_supplier" from main funnel
+  const activeAssignments = (assignmentsData || []).filter(a => a.stage !== "paid");
+
+  // Phase stats
+  const phaseStats = ASSIGNMENT_PHASES.map(phase => {
+    const items = activeAssignments.filter(a => getAssignmentPhase(a.stage) === phase.id);
+    const overdueCount = items.filter(a => {
+      const limit = ASSIGNMENT_SLA_LIMITS[a.stage];
+      if (!limit || limit.days === 0) return false;
+      const days = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(a) : 0;
+      return days > limit.days;
+    }).length;
+    return {...phase, count: items.length, overdueCount};
+  });
+
+  // Stage stats for currently-expanded phase (when user clicks a phase)
+  const stageStatsForPhase = (phaseId) => {
+    return ASSIGNMENT_STAGES
+      .filter(s => s.phase === phaseId)
+      .map(s => {
+        const items = activeAssignments.filter(a => a.stage === s.id);
+        const overdueCount = items.filter(a => {
+          const limit = ASSIGNMENT_SLA_LIMITS[a.stage];
+          if (!limit || limit.days === 0) return false;
+          const days = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(a) : 0;
+          return days > limit.days;
+        }).length;
+        return {...s, count: items.length, overdueCount};
+      });
+  };
+
+  const getLoad = (count) => count === 0 ? "empty" : count >= OVERLOAD_THRESHOLD ? "overload" : "normal";
+
+  const totalCount = phaseStats.reduce((s, p) => s + p.count, 0);
+  const totalOverdue = phaseStats.reduce((s, p) => s + p.overdueCount, 0);
+
+  // Currently-showing stages (if a phase is active — show its stages)
+  const visibleStages = activePhase && activePhase !== "all" ? stageStatsForPhase(activePhase) : null;
+
+  return <Card className="mb-5">
+    <button onClick={() => setExpandedBool(!expandedBool)}
+      className="w-full flex items-center justify-between gap-3 p-3 hover:bg-slate-50 transition-colors text-left">
+      <div className="flex items-center gap-2">
+        {expandedBool ? <ChevronDown size={14} style={{color: B.t3}}/> : <ChevronRight size={14} style={{color: B.t3}}/>}
+        <span className="text-sm font-bold" style={{color: B.t1}}>Воронка уступок</span>
+        <span className="text-[10px]" style={{color: B.t3}}>
+          · {totalCount} {totalCount === 1 ? "уступка" : (totalCount >= 2 && totalCount <= 4) ? "уступки" : "уступок"} в работе
+          {totalOverdue > 0 && <span style={{color: B.red}}> · {totalOverdue} {totalOverdue === 1 ? "просрочка" : "просрочек"}</span>}
+        </span>
+      </div>
+      <span className="text-[10px]" style={{color: B.t3}}>{expandedBool ? "Свернуть" : "Развернуть"}</span>
+    </button>
+
+    {expandedBool && <div className="p-4 pt-0">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div className="text-[10px]" style={{color: B.t3}}>Кликните на фазу или этап для фильтрации списка</div>
+        <div className="flex items-center gap-3 text-[10px]" style={{color: B.t3}}>
+          <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full" style={{background: B.border}}/>Пусто</div>
+          <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full" style={{background: B.accent}}/>Норма</div>
+          <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full" style={{background: B.yellow}}/>≥{OVERLOAD_THRESHOLD} перегруз</div>
+          <div className="flex items-center gap-1"><AlertTriangle size={10} style={{color: B.red}}/>Просрочки</div>
+        </div>
+      </div>
+
+      {/* 4 phase cards */}
+      <div className="flex items-stretch gap-0 overflow-x-auto pb-1">
+        {phaseStats.map((p, idx) => {
+          const load = getLoad(p.count);
+          const color = load === "empty" ? B.border : load === "overload" ? B.yellow : B.accent;
+          const bg = load === "empty" ? "#FAFAFA" : load === "overload" ? B.yellowL : B.accentL + "40";
+          const isActive = activePhase === p.id;
+          const hasOverdue = p.overdueCount > 0;
+          const wordForm = p.count === 1 ? "уступка" : (p.count >= 2 && p.count <= 4) ? "уступки" : "уступок";
+
+          return <React.Fragment key={p.id}>
+            <button onClick={() => onPhaseClick && onPhaseClick(p.id)}
+              className="relative flex-1 min-w-[140px] flex flex-col items-stretch rounded-xl overflow-hidden transition-all hover:shadow-md hover:-translate-y-0.5 text-left"
+              style={{
+                background: "white",
+                border: isActive ? `2px solid ${color}` : `1px solid ${B.border}`,
+              }}>
+              <div className="h-1" style={{background: color}}/>
+
+              <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded text-[9px] font-bold mono"
+                style={{background: "#F1F5F9", color: B.t3}}>
+                {idx + 1}/{phaseStats.length}
+              </div>
+
+              <div className="px-3 pt-3 pb-1.5" style={{background: bg}}>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="text-base">{p.icon}</span>
+                  <span className="text-[10px] font-bold" style={{color: B.t1}}>{p.label}</span>
+                </div>
+                <div className="flex items-baseline gap-1.5">
+                  <div className="text-2xl font-black leading-none" style={{color: load === "empty" ? B.t3 : color}}>
+                    {p.count}
+                  </div>
+                  <div className="text-[9px] font-semibold" style={{color: B.t3}}>
+                    {wordForm}
+                  </div>
+                </div>
+                {hasOverdue && <div className="flex items-center gap-1 mt-1.5">
+                  <AlertTriangle size={9} style={{color: B.red}} className="animate-pulse"/>
+                  <span className="text-[9px] font-bold" style={{color: B.red}}>
+                    {p.overdueCount} {p.overdueCount === 1 ? "просрочка" : "просрочек"}
+                  </span>
+                </div>}
+              </div>
+
+              <div className="px-3 py-2 border-t flex-1 space-y-1.5" style={{borderColor: B.border}}>
+                <div className="text-[10px] font-medium leading-tight" style={{color: isActive ? color : B.t2}}>
+                  {p.description}
+                </div>
+                {p.bankAction && <div className="flex items-start gap-1 pt-1.5 border-t border-dashed" style={{borderColor: B.border}}>
+                  <span className="text-[9px] shrink-0 mt-0.5" style={{color: B.t3}}>Что делает банк:</span>
+                </div>}
+                {p.bankAction && <div className="text-[10px] font-semibold leading-tight" style={{color: B.t1}}>
+                  {p.bankAction}
+                </div>}
+                {p.actorsInvolved && <div className="text-[9px] italic leading-tight pt-1 border-t border-dashed" style={{color: B.t3, borderColor: B.border}}>
+                  Участники: {p.actorsInvolved}
+                </div>}
+              </div>
+            </button>
+
+            {idx < phaseStats.length - 1 && <div className="flex items-center shrink-0 px-1" style={{color: B.t3}}>
+              <ChevronRight size={18}/>
+            </div>}
+          </React.Fragment>;
+        })}
+      </div>
+
+      {/* Micro-stages for active phase */}
+      {visibleStages && visibleStages.length > 0 && <div className="mt-3 p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px dashed ${B.border}`}}>
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Фаза «{ASSIGNMENT_PHASES.find(p => p.id === activePhase)?.label}» — {visibleStages.length} {visibleStages.length === 1 ? "этап" : "этапов"} внутри
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {visibleStages.map((s, idx) => {
+            const isStageActive = activeStage === s.id;
+            const isActionable = s.actor === "bank" || s.actor === "platform";
+            return <button key={s.id} onClick={() => onStageClick && onStageClick(s.id)}
+              className="flex items-start gap-3 p-2.5 rounded-lg border transition-all hover:shadow-sm text-left"
+              style={isStageActive
+                ? {background: s.color + "15", borderColor: s.color, borderWidth: 2}
+                : {background: "white", borderColor: B.border}}>
+              {/* Number circle */}
+              <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-[10px] font-black"
+                style={{background: s.color + "20", color: s.color}}>
+                {idx + 1}
+              </div>
+
+              <div className="flex-1 min-w-0 space-y-1">
+                {/* Stage name + count */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[11px] font-bold" style={{color: B.t1}}>{s.label}</span>
+                  <span className="px-1.5 py-0.5 rounded text-[9px] font-black"
+                    style={{background: s.count > 0 ? s.color + "30" : "#F1F5F9", color: s.count > 0 ? s.color : B.t3}}>
+                    {s.count}
+                  </span>
+                  {s.overdueCount > 0 && <span className="text-[9px] font-bold flex items-center gap-0.5" style={{color: B.red}}>
+                    <AlertTriangle size={9} className="animate-pulse"/>
+                    {s.overdueCount}
+                  </span>}
+                </div>
+
+                {/* Who acts */}
+                {s.whoActs && <div className="text-[9px] font-semibold" style={{color: isActionable ? s.color : B.t3}}>
+                  {s.whoActs}
+                </div>}
+
+                {/* Action hint */}
+                {s.actionHint && <div className="text-[10px] leading-tight" style={{color: B.t2}}>
+                  {s.actionHint}
+                </div>}
+              </div>
+            </button>;
+          })}
+        </div>
+      </div>}
+    </div>}
+  </Card>;
+}
+
 function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selectedIds, toggleSelect, setToast}) {
   const [sortBy, setSortBy] = useState({col: "created", dir: "desc"});
 
@@ -5404,9 +6560,14 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
               <td className="px-3 py-2 text-right mono font-bold" style={{color: B.t1}}>{fmtByn(a.amount)}</td>
               <td className="px-3 py-2 text-[10px]" style={{color: B.t3}}>{a.ttnNumber || "—"}</td>
               <td className="px-3 py-2">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <span>{phase?.icon}</span>
                   <span className="text-[11px]" style={{color: stage?.color || B.t2}}>{stage?.label || a.stage}</span>
+                  {a.stage === "usko_checking" && !a.uskoTakenBy && <span
+                    className="px-1.5 py-0.5 rounded text-[9px] font-black animate-pulse"
+                    style={{background: B.accent, color: "white"}}>
+                    🆕 НОВАЯ
+                  </span>}
                 </div>
               </td>
               <td className="px-3 py-2 text-right">
@@ -5735,6 +6896,605 @@ function ClientActivityCard({asg}) {
 }
 
 // Assignment action block (role-specific task on assignment)
+// ─── AssignmentTaskForm — unified form for all assignment stages ───
+// Mirrors RequestTaskForm: header + parameters + documents + stage-specific block + primary action
+function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
+  const stage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
+  const phase = ASSIGNMENT_PHASES.find(p => p.id === stage?.phase);
+  const canAct = canActOnAssignmentStage(currentUser, asg.stage);
+  const creditor = COMPANIES.find(c => c.id === asg.creditorId);
+  const debtor = COMPANIES.find(c => c.id === asg.debtorId);
+
+  // State
+  const [signing, setSigning] = useState(false);
+  const [checkedDocs, setCheckedDocs] = useState({dkp: false, ttn: false, eschf: false});
+  const [returnToSupplierModal, setReturnToSupplierModal] = useState(false);
+  const [supplierIssues, setSupplierIssues] = useState([]);
+  const [supplierComment, setSupplierComment] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [generationStep, setGenerationStep] = useState(asg.dsNumber ? 4 : 0);
+  const [dsNumber, setDsNumber] = useState(asg.dsNumber || null);
+  const [showDsPreview, setShowDsPreview] = useState(false);
+  const [pin, setPin] = useState("");
+  const [returnToUskoModal, setReturnToUskoModal] = useState(false);
+  const [returnToUskoIssues, setReturnToUskoIssues] = useState([]);
+  const [returnToUskoComment, setReturnToUskoComment] = useState("");
+  const [paymentVerified, setPaymentVerified] = useState(false);
+
+  // Final / non-actionable state
+  if (asg.stage === "paid") return null;
+  if (!canAct) return null;
+
+  const days = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(asg) : 0;
+  const slaInfo = ASSIGNMENT_SLA_LIMITS[asg.stage] || {days: 5, actor: "bank"};
+  const overdue = slaInfo.days > 0 && days > slaInfo.days;
+  const slaText = slaInfo.days === 0
+    ? "Автоматический этап"
+    : overdue
+      ? `⚠ ПРОСРОЧЕНО на ${days - slaInfo.days} раб.д`
+      : `Осталось ${Math.max(0, slaInfo.days - days)} раб.д (SLA: ${slaInfo.days}д)`;
+
+  // Actor label
+  const actorLabelMap = {
+    bank: "🏦 Банк", supplier: "👤 Поставщик", debtor: "🚚 Должник", platform: "⚙ Платформа", system: "⚙ Система",
+  };
+  const actorLabel = actorLabelMap[stage?.actor] || "—";
+
+  // Handlers
+  const doAdvance = (nextStage, extraData = {}, msg) => {
+    setSigning(true);
+    setTimeout(() => {
+      setSigning(false);
+      onAction && onAction(nextStage, extraData, msg);
+    }, 1200);
+  };
+
+  // ─── usko_checking: generate DS ───
+  const runDsGeneration = () => {
+    setGenerating(true);
+    setGenerationStep(1);
+    setTimeout(() => {
+      setGenerationStep(2);
+      setTimeout(() => {
+        setGenerationStep(3);
+        setTimeout(() => {
+          const newDsNum = `ДС-${asg.dealId || "XXX"}-${String(Math.floor(Math.random() * 900) + 100)}`;
+          setDsNumber(newDsNum);
+          setGenerationStep(4);
+          setGenerating(false);
+        }, 300);
+      }, 700);
+    }, 500);
+  };
+
+  // Document status badge colors
+  const docStatusColor = {
+    signed: {bg: B.greenL, color: B.green, label: "✓ Подписан"},
+    signed_all: {bg: B.greenL, color: B.green, label: "✓ Все подписали"},
+    signed_bank: {bg: B.accentL, color: B.accent, label: "✓ Банк подписал"},
+    pending: {bg: B.yellowL, color: B.yellow, label: "⏳ Ожидание"},
+    draft: {bg: "#F1F5F9", color: B.t2, label: "📝 Черновик"},
+    rejected: {bg: B.redL, color: B.red, label: "✗ Отклонён"},
+    sent: {bg: B.accentL, color: B.accent, label: "📤 Отправлен"},
+    not_applicable: {bg: "#F8FAFC", color: B.t3, label: "— Не требуется"},
+  };
+
+  const allDocs = [
+    {key: "dkp", label: "ДКП", status: asg.docs?.dkp?.status || "pending", date: asg.docs?.dkp?.date},
+    {key: "ttn", label: "ТТН", status: asg.docs?.ttn?.status || "pending", date: asg.docs?.ttn?.date},
+    {key: "eschf", label: "ЭСЧФ", status: asg.docs?.eschf?.status || "pending", date: asg.docs?.eschf?.date},
+    {key: "ds", label: "ДС", status: asg.docs?.supplementaryAgreement?.status || "not_applicable", date: asg.docs?.supplementaryAgreement?.date},
+    {key: "notif", label: "Уведомление", status: asg.docs?.notification?.status || "not_applicable", date: asg.docs?.notification?.date},
+  ];
+
+  const openDoc = (docKey) => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("oborotka:open-doc", {detail: {assignmentId: asg.id, docType: docKey}}));
+    }
+  };
+
+  // ─── Primary action per stage ───
+  let primaryAction = null;
+  if (asg.stage === "usko_checking") {
+    const allChecked = checkedDocs.dkp && checkedDocs.ttn && checkedDocs.eschf;
+    primaryAction = {
+      label: signing ? "Принимаю..." : "✓ Принять комплект и сформировать ДС",
+      icon: signing ? Loader2 : CheckCircle,
+      disabled: signing || !allChecked,
+      onClick: () => doAdvance("ds_preparing", {uskoCheckedBy: currentUser.name, uskoCheckedDate: "2026-03-26"}, `Комплект документов принят для ${asg.id}. Формирование ДС`),
+    };
+  } else if (asg.stage === "ds_preparing") {
+    primaryAction = {
+      label: generationStep === 4
+        ? (signing ? "Передача..." : "📤 Передать подписанту банка")
+        : (generating ? "Генерация ДС..." : "🔄 Сформировать ДС"),
+      icon: generationStep === 4 ? (signing ? Loader2 : ArrowRight) : (generating ? Loader2 : FileText),
+      disabled: generationStep === 4 ? false : generating,
+      onClick: generationStep === 4
+        ? () => doAdvance("ds_signing_bank", {dsNumber, dsDate: "2026-03-26", docs: {...(asg.docs || {}), supplementaryAgreement: {status: "pending", number: dsNumber}}}, `ДС ${dsNumber} сформировано. Передано подписанту`)
+        : runDsGeneration,
+    };
+  } else if (asg.stage === "ds_signing_bank") {
+    primaryAction = {
+      label: signing ? "Подписание..." : "🔏 Подписать ДС ЭЦП банка",
+      icon: signing ? Loader2 : Pen,
+      disabled: signing || pin.length !== 4,
+      onClick: () => doAdvance("ds_signing_client", {signedByBank: currentUser.name, signedByBankDate: "2026-03-26", docs: {...(asg.docs || {}), supplementaryAgreement: {...(asg.docs?.supplementaryAgreement || {}), status: "signed_bank", date: "2026-03-26"}}}, "ДС подписано банком. Отправлено клиенту"),
+    };
+  } else if (asg.stage === "ds_signing_client") {
+    primaryAction = {
+      label: signing ? "Переход..." : "🧪 Mock: клиент подписал",
+      icon: signing ? Loader2 : CheckCircle,
+      onClick: () => doAdvance("payment_approved", {signedByClientDate: "2026-03-26", docs: {...(asg.docs || {}), supplementaryAgreement: {...(asg.docs?.supplementaryAgreement || {}), status: "signed_all", date: "2026-03-26"}}}, "Клиент подписал ДС. Переход на оплату"),
+    };
+  } else if (asg.stage === "payment_approved") {
+    primaryAction = {
+      label: signing ? "Разрешение оплаты..." : "💰 Разрешить оплату в АБС",
+      icon: signing ? Loader2 : CheckCircle,
+      disabled: signing || !paymentVerified,
+      onClick: () => doAdvance("paid", {paymentApprovedBy: currentUser.name, paymentApprovedDate: "2026-03-26", paidDate: "2026-03-26"}, `💰 Оплата ${fmtByn(asg.toReceive || 0)} разрешена в АБС. Средства поступят клиенту`),
+    };
+  }
+
+  return <>
+    <Card className="p-5 mb-4" style={{background: (stage?.color || B.accent) + "06", borderColor: stage?.color || B.accent, borderWidth: 2}}>
+      {/* ─── Header ─── */}
+      <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b" style={{borderColor: B.border}}>
+        <div className="flex items-start gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background: "white", border: `1px solid ${(stage?.color || B.accent)}30`}}>
+            {phase?.icon || "📦"}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: stage?.color || B.accent}}>
+              Ваша задача
+            </div>
+            <div className="text-base font-bold mt-0.5" style={{color: B.t1}}>
+              {stage?.label || asg.stage}
+            </div>
+            <div className="text-[10px] mt-1" style={{color: overdue ? B.red : B.t2}}>
+              {slaText}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+          <span className="text-[10px] font-bold px-2 py-1 rounded-lg" style={{background: B.accentL, color: B.accent}}>
+            {phase?.icon} {phase?.label}
+          </span>
+          <span className="text-[10px] font-bold px-2 py-1 rounded-lg" style={{background: "#F1F5F9", color: B.t2}}>
+            {actorLabel}
+          </span>
+        </div>
+      </div>
+
+      {/* ─── NEW assignment banner (for usko_checking without uskoTakenBy) ─── */}
+      {asg.stage === "usko_checking" && !asg.uskoTakenBy && <div className="flex items-center gap-2 p-2.5 rounded-lg mb-4" style={{background: B.accentL, borderLeft: `3px solid ${B.accent}`}}>
+        <span className="text-base">🆕</span>
+        <div>
+          <div className="text-xs font-bold" style={{color: B.accent}}>Новая уступка</div>
+          <div className="text-[10px]" style={{color: B.t2}}>Документы поступили, ждёт вашей проверки</div>
+        </div>
+      </div>}
+
+      {/* ─── Block: Параметры уступки ─── */}
+      <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Параметры уступки
+        </div>
+        <div className="grid grid-cols-4 gap-3 mb-3">
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>ID · сделка</div>
+            <div className="text-xs font-bold mono" style={{color: B.accent}}>{asg.id}</div>
+            <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>{asg.dealId}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Клиент (поставщик)</div>
+            <div className="text-xs font-bold truncate" style={{color: B.t1}}>{creditor?.name || "—"}</div>
+            <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>УНП {creditor?.unp || "—"}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Должник</div>
+            <div className="text-xs font-bold truncate" style={{color: B.t1}}>{debtor?.name || "—"}</div>
+            <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>УНП {debtor?.unp || "—"}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Сумма / К получению</div>
+            <div className="text-sm font-black mono" style={{color: B.t1}}>{fmtByn(asg.amount || 0)}</div>
+            {asg.toReceive && <div className="text-[10px] mono mt-0.5" style={{color: B.green}}>
+              → {fmtByn(asg.toReceive)} (дисконт {fmtByn(asg.discount || 0)})
+            </div>}
+          </div>
+        </div>
+        <div className="grid grid-cols-4 gap-3">
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Номер ТТН</div>
+            <div className="text-xs mono" style={{color: B.t1}}>{asg.ttnNumber || "—"}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Дата отгрузки</div>
+            <div className="text-xs" style={{color: B.t1}}>{asg.shippingDate || "—"}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>Создана</div>
+            <div className="text-xs" style={{color: B.t1}}>{asg.createdDate || "—"}</div>
+          </div>
+          <div>
+            <div className="text-[10px]" style={{color: B.t3}}>На этапе</div>
+            <div className="text-xs" style={{color: overdue ? B.red : B.t1}}>{days} раб.д</div>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Block: Документы (5 chips) ─── */}
+      <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Документы уступки
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {allDocs.map(d => {
+            const cfg = docStatusColor[d.status] || docStatusColor.pending;
+            return <button key={d.key} onClick={() => openDoc(d.key)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-semibold transition-all hover:shadow-sm"
+              style={{background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.color}20`}}>
+              <span>{d.label}</span>
+              <span className="text-[9px] font-bold">{cfg.label}</span>
+              {d.date && <span className="text-[9px] mono opacity-70">· {d.date}</span>}
+              <ExternalLink size={10}/>
+            </button>;
+          })}
+        </div>
+      </div>
+
+      {/* ─── Stage-specific block ─── */}
+
+      {/* usko_checking: checklist */}
+      {asg.stage === "usko_checking" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Проверка комплекта документов
+        </div>
+        <div className="space-y-1.5 p-3 rounded-xl" style={{background: "#F8FAFC"}}>
+          {[
+            {key: "dkp", label: "Договор купли-продажи (ДКП) — цена, стороны, подписи"},
+            {key: "ttn", label: "ТТН — факт отгрузки, подпись должника"},
+            {key: "eschf", label: "ЭСЧФ — электронный счёт-фактура (НДС)"},
+          ].map(item => <label key={item.key} className="flex items-center gap-2 cursor-pointer hover:bg-white p-1.5 rounded">
+            <input type="checkbox" checked={checkedDocs[item.key]}
+              onChange={e => setCheckedDocs(prev => ({...prev, [item.key]: e.target.checked}))}
+              className="w-4 h-4"/>
+            <span className="text-[11px]" style={{color: B.t1}}>{item.label}</span>
+          </label>)}
+        </div>
+        <div className="text-[10px] mt-2 italic" style={{color: B.t3}}>
+          <Info size={10} className="inline mr-1"/>
+          Отметьте все проверенные документы, чтобы активировать кнопку приёмки
+        </div>
+      </div>}
+
+      {/* ds_preparing: DS generation */}
+      {asg.stage === "ds_preparing" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Формирование дополнительного соглашения (ДС)
+        </div>
+
+        {/* Summary of what DS will contain */}
+        <div className="p-3 rounded-xl mb-3" style={{background: B.accentL + "40", borderLeft: `3px solid ${B.accent}`}}>
+          <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.accent}}>
+            Данные в ДС
+          </div>
+          <div className="grid grid-cols-3 gap-3 mt-2 text-[11px]">
+            <div><span style={{color: B.t3}}>Сумма уступки:</span> <strong className="mono" style={{color: B.t1}}>{fmtByn(asg.amount || 0)}</strong></div>
+            <div><span style={{color: B.t3}}>Дисконт:</span> <strong className="mono" style={{color: B.red}}>{fmtByn(asg.discount || 0)}</strong></div>
+            <div><span style={{color: B.t3}}>К выплате:</span> <strong className="mono" style={{color: B.green}}>{fmtByn(asg.toReceive || 0)}</strong></div>
+            <div><span style={{color: B.t3}}>Должник:</span> <strong style={{color: B.t1}}>{debtor?.name || "—"}</strong></div>
+            <div><span style={{color: B.t3}}>ТТН:</span> <strong className="mono" style={{color: B.t1}}>{asg.ttnNumber || "—"}</strong></div>
+            <div><span style={{color: B.t3}}>Отгрузка:</span> <strong style={{color: B.t1}}>{asg.shippingDate || "—"}</strong></div>
+          </div>
+        </div>
+
+        {/* Generation progress */}
+        {generating && <div className="p-3 rounded-xl mb-3" style={{background: B.accentL + "40", borderLeft: `3px solid ${B.accent}`}}>
+          <div className="text-[10px] font-bold mb-2" style={{color: B.accent}}>Платформа формирует ДС...</div>
+          <div className="space-y-1.5">
+            {[
+              {step: 1, label: "Подтягиваем данные из сделки"},
+              {step: 2, label: "Заполняем шаблон ДС"},
+              {step: 3, label: "Присваиваем номер"},
+            ].map(s => <div key={s.step} className="flex items-center gap-2 text-[11px]">
+              {generationStep > s.step
+                ? <CheckCircle size={12} style={{color: B.green}}/>
+                : generationStep === s.step
+                  ? <Loader2 size={12} style={{color: B.accent}} className="animate-spin"/>
+                  : <div className="w-3 h-3 rounded-full border" style={{borderColor: B.border}}/>}
+              <span style={{color: generationStep >= s.step ? B.t1 : B.t3, fontWeight: generationStep === s.step ? 600 : 400}}>
+                {s.label}
+              </span>
+            </div>)}
+          </div>
+        </div>}
+
+        {/* Generated DS preview */}
+        {generationStep === 4 && dsNumber && <div className="p-4 rounded-xl mb-3" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+              <FileText size={20} style={{color: B.green}}/>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: B.green}}>✓ ДС сформировано</div>
+              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
+                Допсоглашение <span className="mono">№{dsNumber}</span>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <button onClick={() => setShowDsPreview(true)}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Eye size={11}/> Открыть превью
+                </button>
+                <span style={{color: B.t3}}>·</span>
+                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Download size={11}/> Скачать PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>}
+      </div>}
+
+      {/* ds_signing_bank: PIN + return link */}
+      {asg.stage === "ds_signing_bank" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Подписание ДС ЭЦП банка
+        </div>
+
+        <div className="p-4 rounded-xl mb-3" style={{background: "#ECFEFF", borderLeft: `3px solid #06B6D4`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+              <FileText size={20} style={{color: "#06B6D4"}}/>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: "#06B6D4"}}>ДС готово к подписи</div>
+              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
+                Допсоглашение {asg.dsNumber && <span className="mono">№{asg.dsNumber}</span>}
+              </div>
+              <div className="text-[10px] mt-1" style={{color: B.t2}}>
+                Клиент: <strong>{creditor?.name}</strong> · Должник: <strong>{debtor?.name}</strong> · К выплате: <strong className="mono">{fmtByn(asg.toReceive || 0)}</strong>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <button onClick={() => setShowDsPreview(true)}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Eye size={11}/> Открыть ДС
+                </button>
+                <span style={{color: B.t3}}>·</span>
+                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
+                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+                  <Download size={11}/> Скачать PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-3">
+          <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
+            PIN-код ЭЦП банка <span style={{color: B.red}}>*</span>
+          </label>
+          <input type="password" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            placeholder="••••" maxLength={4}
+            className="w-full px-3 py-2 text-lg rounded-lg border border-slate-200 mono text-center"
+            style={{color: B.t1, letterSpacing: "0.5em"}}/>
+          <div className="text-[9px] mt-1" style={{color: B.t3}}>
+            4 цифры. Демо-режим: любые 4 цифры подойдут.
+          </div>
+        </div>
+
+        <div className="flex items-center justify-center pb-2 border-b mb-2" style={{borderColor: B.border}}>
+          <button onClick={() => setReturnToUskoModal(true)}
+            className="text-[11px] font-semibold hover:underline flex items-center gap-1" style={{color: B.red}}>
+            ↩ Вернуть УСКО на доработку
+          </button>
+        </div>
+      </div>}
+
+      {/* ds_signing_client: waiting */}
+      {asg.stage === "ds_signing_client" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Ожидание подписи клиента
+        </div>
+        <div className="p-4 rounded-xl mb-3" style={{background: "#F0F9FF", borderLeft: `3px solid #0891B2`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 text-2xl" style={{background: "white"}}>
+              ⏳
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: "#0891B2"}}>Клиент подписывает ДС</div>
+              <div className="text-[11px] mt-1" style={{color: B.t2}}>
+                <strong>{creditor?.name}</strong> должен подписать ДС ЭЦП в своём кабинете.
+              </div>
+              {asg.signedByBankDate && <div className="text-[10px] mt-2" style={{color: B.t3}}>
+                Банк подписал: {asg.signedByBankDate} · {asg.signedByBank || "—"}
+              </div>}
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-2 mb-2">
+          <Btn size="sm" variant="ghost" icon={Mail} className="flex-1"
+            onClick={() => setToast && setToast({msg: "Напоминание отправлено клиенту на email", type: "info"})}>
+            Напомнить на email
+          </Btn>
+          <Btn size="sm" variant="ghost" icon={Bell} className="flex-1"
+            onClick={() => setToast && setToast({msg: "SMS-напоминание отправлено", type: "info"})}>
+            SMS-напоминание
+          </Btn>
+        </div>
+        <div className="text-[10px] italic flex items-center gap-1" style={{color: B.t3}}>
+          <Info size={10}/>Клиент подписывает в своём кабинете. Ниже — mock-кнопка для демо.
+        </div>
+      </div>}
+
+      {/* payment_approved: checkbox + warning */}
+      {asg.stage === "payment_approved" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Разрешение на оплату в АБС
+        </div>
+        <div className="p-4 rounded-xl mb-3" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
+          <div className="grid grid-cols-3 gap-3 text-[11px]">
+            <div><span style={{color: B.t3}}>Получатель:</span> <strong style={{color: B.t1}}>{creditor?.name}</strong></div>
+            <div><span style={{color: B.t3}}>Счёт:</span> <strong className="mono" style={{color: B.t1}}>{creditor?.accountNumber || "—"}</strong></div>
+            <div><span style={{color: B.t3}}>К выплате:</span> <strong className="mono text-sm" style={{color: B.green}}>{fmtByn(asg.toReceive || 0)}</strong></div>
+          </div>
+        </div>
+        <label className="flex items-start gap-2 p-3 rounded-xl cursor-pointer hover:bg-slate-50 mb-3" style={{border: `1px solid ${B.border}`}}>
+          <input type="checkbox" checked={paymentVerified}
+            onChange={e => setPaymentVerified(e.target.checked)}
+            className="w-4 h-4 mt-0.5"/>
+          <span className="text-[11px]" style={{color: B.t1}}>
+            Я проверил реквизиты получателя и подтверждаю корректность суммы <strong>{fmtByn(asg.toReceive || 0)}</strong>
+          </span>
+        </label>
+        <div className="p-2.5 rounded-lg text-[10px] flex items-start gap-2" style={{background: B.yellowL}}>
+          <AlertTriangle size={12} style={{color: B.yellow}} className="shrink-0 mt-0.5"/>
+          <span style={{color: B.t2}}>
+            <strong style={{color: B.yellow}}>Внимание.</strong> После разрешения сумма уйдёт на счёт поставщика через АБС банка. Отменить нельзя.
+          </span>
+        </div>
+      </div>}
+
+      {/* ─── Footer: primary action ─── */}
+      <div className="pt-3 border-t" style={{borderColor: B.border}}>
+        {primaryAction && <Btn size="lg" icon={primaryAction.icon}
+          disabled={primaryAction.disabled != null ? primaryAction.disabled : signing}
+          className="w-full"
+          onClick={primaryAction.onClick}>
+          {primaryAction.label}
+        </Btn>}
+
+        {/* Secondary action: "Return to supplier" for usko_checking */}
+        {asg.stage === "usko_checking" && <div className="flex items-center justify-center mt-3">
+          <button onClick={() => {setSupplierIssues([]); setSupplierComment(""); setReturnToSupplierModal(true);}}
+            className="text-[11px] font-semibold hover:underline flex items-center gap-1" style={{color: B.red}}>
+            ↩ Вернуть поставщику на доработку
+          </button>
+        </div>}
+      </div>
+    </Card>
+
+    {/* ─── Modal: return to supplier ─── */}
+    <Modal open={returnToSupplierModal} onClose={() => setReturnToSupplierModal(false)} title="Вернуть поставщику на доработку">
+      <div className="space-y-4">
+        <div className="p-3 rounded-xl" style={{background: "#F8FAFC"}}>
+          <div className="text-[10px] font-semibold mb-1" style={{color: B.t3}}>Уступка вернётся поставщику</div>
+          <div className="text-xs font-bold" style={{color: B.t1}}>{creditor?.name}</div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-2 block" style={{color: B.t2}}>Что не так?</label>
+          <div className="space-y-1.5">
+            {[
+              {key: "no_ttn", label: "Отсутствует ТТН"},
+              {key: "wrong_amount", label: "Несоответствие суммы в ДКП и ТТН"},
+              {key: "no_eschf", label: "Отсутствует ЭСЧФ"},
+              {key: "wrong_debtor", label: "Несоответствие данных должника"},
+              {key: "other", label: "Другое (указать в комментарии)"},
+            ].map(issue => <label key={issue.key} className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-slate-50">
+              <input type="checkbox" checked={supplierIssues.includes(issue.key)} onChange={e => {
+                setSupplierIssues(prev => e.target.checked ? [...prev, issue.key] : prev.filter(x => x !== issue.key));
+              }}/>
+              <span className="text-xs" style={{color: B.t1}}>{issue.label}</span>
+            </label>)}
+          </div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block" style={{color: B.t2}}>Комментарий (обязательно)</label>
+          <textarea value={supplierComment} onChange={e => setSupplierComment(e.target.value)} rows={2}
+            placeholder="Например: «ТТН без подписи должника»"
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" style={{color: B.t1}}/>
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setReturnToSupplierModal(false)} className="flex-1">Отмена</Btn>
+          <Btn variant="danger" icon={XCircle} className="flex-1"
+            disabled={supplierIssues.length === 0 || !supplierComment.trim()}
+            onClick={() => {
+              onAction && onAction("returned_to_supplier", {_returnIssues: supplierIssues, _returnComment: supplierComment}, "Возвращено поставщику на доработку");
+              setReturnToSupplierModal(false);
+            }}>
+            Вернуть
+          </Btn>
+        </div>
+      </div>
+    </Modal>
+
+    {/* ─── Modal: return to USKO ─── */}
+    <Modal open={returnToUskoModal} onClose={() => setReturnToUskoModal(false)} title="Вернуть УСКО на доработку">
+      <div className="space-y-4">
+        <div className="p-3 rounded-xl" style={{background: "#F8FAFC"}}>
+          <div className="text-[10px] font-semibold mb-1" style={{color: B.t3}}>ДС вернётся на этап «Формирование ДС»</div>
+          <div className="text-xs font-bold" style={{color: B.t1}}>УСКО-специалист</div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-2 block" style={{color: B.t2}}>Что исправить в ДС?</label>
+          <div className="space-y-1.5">
+            {[
+              {key: "wrong_amount_ds", label: "Неверная сумма в ДС"},
+              {key: "wrong_debtor_ds", label: "Неверные данные должника"},
+              {key: "wrong_template", label: "Использован неправильный шаблон"},
+              {key: "other_ds", label: "Другое (указать в комментарии)"},
+            ].map(issue => <label key={issue.key} className="flex items-center gap-2 cursor-pointer p-2 rounded-lg hover:bg-slate-50">
+              <input type="checkbox" checked={returnToUskoIssues.includes(issue.key)} onChange={e => {
+                setReturnToUskoIssues(prev => e.target.checked ? [...prev, issue.key] : prev.filter(x => x !== issue.key));
+              }}/>
+              <span className="text-xs" style={{color: B.t1}}>{issue.label}</span>
+            </label>)}
+          </div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block" style={{color: B.t2}}>Комментарий (обязательно)</label>
+          <textarea value={returnToUskoComment} onChange={e => setReturnToUskoComment(e.target.value)} rows={2}
+            placeholder="Например: «В ДС сумма 120K, а в уступке 150K»"
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" style={{color: B.t1}}/>
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setReturnToUskoModal(false)} className="flex-1">Отмена</Btn>
+          <Btn variant="danger" icon={XCircle} className="flex-1"
+            disabled={returnToUskoIssues.length === 0 || !returnToUskoComment.trim()}
+            onClick={() => {
+              onAction && onAction("ds_preparing", {_returnIssues: returnToUskoIssues, _returnComment: returnToUskoComment}, "Возвращено УСКО на доработку ДС");
+              setReturnToUskoModal(false);
+            }}>
+            Вернуть
+          </Btn>
+        </div>
+      </div>
+    </Modal>
+
+    {/* ─── Modal: DS preview ─── */}
+    <Modal open={showDsPreview} onClose={() => setShowDsPreview(false)} title={`Превью: ДС ${dsNumber || asg.dsNumber || "—"}`}>
+      <div className="space-y-3">
+        <div className="p-4 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`, fontFamily: "serif"}}>
+          <div className="text-center mb-3">
+            <div className="text-sm font-bold" style={{color: B.t1}}>ДОПОЛНИТЕЛЬНОЕ СОГЛАШЕНИЕ</div>
+            <div className="text-[11px] mono mt-1" style={{color: B.t2}}>№ {dsNumber || asg.dsNumber || "—"} от 26.03.2026</div>
+            <div className="text-[11px] mt-1" style={{color: B.t3}}>к Генеральному договору факторинга сделки {asg.dealId}</div>
+          </div>
+          <div className="text-[11px] leading-relaxed space-y-2" style={{color: B.t2}}>
+            <p><strong>Стороны:</strong></p>
+            <p className="pl-4">Банк (Фактор): <strong>ОАО «Банк Оборотка»</strong></p>
+            <p className="pl-4">Клиент (Кредитор, Поставщик): <strong>{creditor?.name}</strong> (УНП {creditor?.unp})</p>
+            <p><strong>1. ПРЕДМЕТ.</strong> Клиент уступает Банку денежное требование к должнику по поставке товара по ТТН № {asg.ttnNumber || "—"} от {asg.shippingDate || "—"}.</p>
+            <p><strong>2. ДОЛЖНИК.</strong> {debtor?.name} (УНП {debtor?.unp})</p>
+            <p><strong>3. ФИНАНСОВЫЕ УСЛОВИЯ.</strong></p>
+            <p className="pl-4">3.1. Сумма уступки: <strong className="mono">{fmtByn(asg.amount || 0)}</strong></p>
+            <p className="pl-4">3.2. Дисконт: <strong className="mono">{fmtByn(asg.discount || 0)}</strong></p>
+            <p className="pl-4">3.3. К выплате клиенту: <strong className="mono">{fmtByn(asg.toReceive || 0)}</strong></p>
+            <p className="pl-4">3.4. Срок оплаты должником: до {asg.dueDate || "—"}</p>
+            <p className="pt-3 text-center italic" style={{color: B.t3}}>— превью сокращено, полный текст в PDF —</p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setShowDsPreview(false)} className="flex-1">Закрыть</Btn>
+          <Btn variant="secondary" icon={Download} onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})} className="flex-1">Скачать PDF</Btn>
+        </div>
+      </div>
+    </Modal>
+  </>;
+}
+
 function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
   const [signing, setSigning] = useState(false);
   const [requestDocsModal, setRequestDocsModal] = useState(false);
@@ -5992,6 +7752,18 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
   const debtor = COMPANIES.find(c=>c.id===asg.debtorId);
   const deal = PIPELINE.find(p=>p.id===asg.dealId);
 
+  // Implicit take: when usko_prepare (or admin) opens a new usko_checking assignment,
+  // automatically mark it as taken. Removes need for a separate "Take in work" button.
+  useEffect(() => {
+    if (!setAssignmentsData) return;
+    if (asg.stage !== "usko_checking") return;
+    if (asg.uskoTakenBy) return;
+    if (currentUser.role !== "usko_prepare" && currentUser.role !== "admin") return;
+    setAssignmentsData(prev => prev.map(a => a.id === asg.id
+      ? {...a, uskoTakenBy: currentUser.name, uskoTakenDate: "2026-03-26"}
+      : a));
+  }, [asg.id, asg.stage, asg.uskoTakenBy, currentUser.role, currentUser.name, setAssignmentsData]);
+
   const handleAction = (nextStage, extraData={}, msg) => {
     const ACTION_MAP = {
       ds_preparing: "checked_ok",
@@ -6006,9 +7778,11 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
       user: currentUser.name,
       userRole: currentUser.role,
       date: "2026-03-26",
-      comment: extraData._returnDsComment || extraData.returnReason?.comment || null,
-      issues: extraData._returnDsIssues || null,
+      comment: extraData._returnComment || extraData._returnDsComment || extraData.returnReason?.comment || null,
+      issues: extraData._returnIssues || extraData._returnDsIssues || null,
     };
+    delete extraData._returnIssues;
+    delete extraData._returnComment;
     delete extraData._returnDsIssues;
     delete extraData._returnDsComment;
 
@@ -6021,7 +7795,7 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
   };
 
   return <div>
-    <PageHeader title={`Уступка ${asg.id}`} breadcrumbs={["Уступки", asg.dealId, asg.id]} onBack={onBack}
+    <PageHeader title={`Уступка ${asg.id}`} subtitle={creditor?.name} breadcrumbs={["Уступки", asg.dealId, asg.id]} onBack={onBack}
       actions={<div className="flex items-center gap-2">
         {/* Link to parent deal */}
         <button onClick={()=>{if(typeof window!=="undefined")window.dispatchEvent(new CustomEvent("oborotka:nav",{detail:{page:"pipeline"}}))}}
@@ -6033,8 +7807,11 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
         <span className="px-2 py-1 rounded-lg text-[10px] font-bold" style={{background:B.accentL, color:B.accent}}>{fmtByn(asg.amount)}</span>
       </div>}/>
 
-    {/* Action block (role-specific task) */}
-    <AssignmentActionBlock asg={asg} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>
+    {/* Unified task form — primary UI for actionable assignments */}
+    <AssignmentTaskForm asg={asg} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>
+    {/* Fallback: old ActionBlock for edge cases (paid, no action user, etc) */}
+    {(!canActOnAssignmentStage(currentUser, asg.stage) || asg.stage === "paid") &&
+      <AssignmentActionBlock asg={asg} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>}
 
     {/* Client reminder — when waiting for supplier/debtor action */}
     {isAssignmentWaitingClient(asg) && asg.stage !== "paid" && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow+"40"}}>
@@ -6060,7 +7837,7 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
     </Card>}
 
     {/* Simplified process banner — shown when parent deal has approved limit */}
-    {deal && deal.approvedLimit > 0 && deal.contractType === "general" && <Card className="p-3 mb-4" style={{background: B.greenL, borderColor: B.green+"40"}}>
+    {deal && deal.approvedLimit > 0 && <Card className="p-3 mb-4" style={{background: B.greenL, borderColor: B.green+"40"}}>
       <div className="flex items-start gap-2">
         <CheckCircle size={14} style={{color: B.green}} className="shrink-0 mt-0.5"/>
         <div className="text-[11px]" style={{color: B.t2}}>
@@ -6100,7 +7877,7 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
           <h3 className="text-sm font-bold mb-4" style={{color:B.t1}}>Информация об уступке</h3>
           <div className="grid grid-cols-2 gap-4 text-xs">
             <div><span style={{color:B.t3}}>ID уступки:</span><div className="font-semibold mono mt-0.5" style={{color:B.accent}}>{asg.id}</div></div>
-            <div><span style={{color:B.t3}}>Сделка:</span><div className="font-semibold mono mt-0.5" style={{color:B.t1}}>{asg.dealId}{deal?.contractType==="onetime"?" (разовый)":""}</div></div>
+            <div><span style={{color:B.t3}}>Сделка:</span><div className="font-semibold mono mt-0.5" style={{color:B.t1}}>{asg.dealId}</div></div>
             <div><span style={{color:B.t3}}>Сумма:</span><div className="font-bold mt-0.5" style={{color:B.t1}}>{fmtByn(asg.amount)}</div></div>
             <div><span style={{color:B.t3}}>ТТН:</span><div className="font-semibold mt-0.5" style={{color:B.t1}}>{asg.ttnNumber||"—"}</div></div>
             <div><span style={{color:B.t3}}>Дата создания:</span><div className="font-semibold mt-0.5" style={{color:B.t1}}>{asg.createdDate}</div></div>
@@ -6256,6 +8033,7 @@ function AssignmentsPage({currentUser, setToast}) {
 
   // Filters
   const [phaseFilter, setPhaseFilter] = useState("all");
+  const [stageFilter, setStageFilter] = useState("all");
   const [amountFilter, setAmountFilter] = useState("all");
   const [supplierFilter, setSupplierFilter] = useState("all");
   const [debtorFilter, setDebtorFilter] = useState("all");
@@ -6296,6 +8074,9 @@ function AssignmentsPage({currentUser, setToast}) {
 
     // Phase
     if (phaseFilter !== "all" && getAssignmentPhase(a.stage) !== phaseFilter) return false;
+
+    // Stage (when user clicks a micro-stage in the funnel)
+    if (stageFilter !== "all" && a.stage !== stageFilter) return false;
 
     // Amount
     if (amountFilter === "small" && a.amount > 50000) return false;
@@ -6396,55 +8177,71 @@ function AssignmentsPage({currentUser, setToast}) {
   return <div>
     <PageHeader title="Уступки" breadcrumbs={["Уступки"]}/>
 
-    {/* KPI strip */}
-    <div className="grid grid-cols-4 gap-3 mb-5">
-      <Card className="p-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: B.accentL}}>
-            <Package size={16} style={{color: B.accent}}/>
-          </div>
-          <div className="min-w-0">
-            <div className="text-[10px]" style={{color: B.t3}}>В работе</div>
-            <div className="text-lg font-black" style={{color: B.t1}}>{activeCount}</div>
-          </div>
-        </div>
-      </Card>
-      <button onClick={()=>setViewMode("overdue")} className="text-left">
+    {/* Workflow health — funnel visualization */}
+    <AssignmentWorkflowHealthBanner
+      assignmentsData={assignmentsData}
+      activePhase={phaseFilter === "all" ? null : phaseFilter}
+      onPhaseClick={(phaseId) => {
+        setPhaseFilter(phaseFilter === phaseId ? "all" : phaseId);
+        setStageFilter("all"); // clear stage filter when phase changes
+      }}
+      activeStage={stageFilter === "all" ? null : stageFilter}
+      onStageClick={(stageId) => setStageFilter(stageFilter === stageId ? "all" : stageId)}
+    />
+
+    {/* KPI strip — phase-based, clickable to filter */}
+    <div className="grid grid-cols-5 gap-3 mb-5">
+      {ASSIGNMENT_PHASES.map(phase => {
+        const items = assignmentsData.filter(a => a.stage !== "paid" && getAssignmentPhase(a.stage) === phase.id);
+        const isActive = phaseFilter === phase.id;
+        const count = items.length;
+        return <button key={phase.id}
+          onClick={() => {
+            setPhaseFilter(phaseFilter === phase.id ? "all" : phase.id);
+            setStageFilter("all");
+          }}
+          className="text-left">
+          <Card className="p-3 hover:shadow-md transition-all cursor-pointer"
+            style={isActive ? {borderColor: B.accent, borderWidth: 2} : {}}>
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 text-base" style={{background: isActive ? B.accent : B.accentL}}>
+                <span>{phase.icon}</span>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-[10px] leading-tight" style={{color: B.t3}}>{phase.label}</div>
+                <div className="text-lg font-black" style={{color: count > 0 ? (isActive ? B.accent : B.t1) : B.t3}}>{count}</div>
+              </div>
+            </div>
+          </Card>
+        </button>;
+      })}
+      {/* Overdue SLA — always visible as 5th card */}
+      <button onClick={()=>setViewMode(viewMode === "overdue" ? "all" : "overdue")} className="text-left">
         <Card className="p-3 hover:shadow-md transition-all cursor-pointer"
           style={viewMode === "overdue" ? {borderColor: B.red, borderWidth: 2} : {}}>
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: B.redL}}>
-              <AlertTriangle size={16} style={{color: B.red}}/>
+              <AlertTriangle size={16} style={{color: B.red}} className={bankOverdue.length > 0 ? "animate-pulse" : ""}/>
             </div>
             <div className="min-w-0">
-              <div className="text-[10px]" style={{color: B.t3}}>Просрочка SLA банка</div>
+              <div className="text-[10px] leading-tight" style={{color: B.t3}}>Просрочка SLA</div>
               <div className="text-lg font-black" style={{color: bankOverdue.length > 0 ? B.red : B.t3}}>{bankOverdue.length}</div>
             </div>
           </div>
         </Card>
       </button>
-      <Card className="p-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: B.greenL}}>
-            <CheckCircle size={16} style={{color: B.green}}/>
-          </div>
-          <div className="min-w-0">
-            <div className="text-[10px]" style={{color: B.t3}}>Оплачено за 30д</div>
-            <div className="text-lg font-black" style={{color: B.green}}>{paidMonthCount}</div>
-          </div>
-        </div>
-      </Card>
-      <Card className="p-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: "#EEF2FF"}}>
-            <Clock size={16} style={{color: "#6366F1"}}/>
-          </div>
-          <div className="min-w-0">
-            <div className="text-[10px]" style={{color: B.t3}}>Оборачиваемость</div>
-            <div className="text-lg font-black" style={{color: B.t1}}>{avgTurnover != null ? `${avgTurnover}д` : "—"}</div>
-          </div>
-        </div>
-      </Card>
+    </div>
+
+    {/* Secondary KPI row (small) */}
+    <div className="flex items-center gap-4 mb-5 text-[11px]" style={{color: B.t2}}>
+      <span className="flex items-center gap-1.5">
+        <CheckCircle size={12} style={{color: B.green}}/>
+        Оплачено за 30д: <strong style={{color: B.green}}>{paidMonthCount}</strong>
+      </span>
+      <span className="flex items-center gap-1.5">
+        <Clock size={12} style={{color: "#6366F1"}}/>
+        Средняя оборачиваемость: <strong style={{color: B.t1}}>{avgTurnover != null ? `${avgTurnover}д` : "—"}</strong>
+      </span>
     </div>
 
     {/* View mode tabs + layout switcher */}
@@ -6573,8 +8370,7 @@ function AssignmentsPage({currentUser, setToast}) {
                     <span className="font-bold mono text-sm" style={{color:B.accent}}>{dealId}</span>
                     <span className="text-xs" style={{color:B.t3}}>·</span>
                     <span className="text-sm font-bold" style={{color:B.t1}}>{creditor?.name||deal?.company}</span>
-                    {deal?.contractType === "onetime" && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{background:B.purpleL,color:B.purple}}>Разовый</span>}
-                    {deal?.contractType !== "onetime" && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{background:B.accentL,color:B.accent}}>Генеральный</span>}
+                    {deal && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{background:B.accentL,color:B.accent}}>Генеральный</span>}
                   </div>
                   <div className="text-[10px]" style={{color:B.t3}}>Активен с {deal?.stageStartDate||"—"}</div>
                 </div>
@@ -6863,7 +8659,7 @@ function DocumentDetailPage({docId, onBack, setToast}) {
   };
 
   return <div>
-    <PageHeader title={doc.title} breadcrumbs={["Документы", doc.id]} onBack={onBack}
+    <PageHeader title={doc.title} subtitle={doc.relatedTo?.company} breadcrumbs={["Документы", doc.id]} onBack={onBack}
       actions={<div className="flex items-center gap-2">
         {/* Cross-module links */}
         {doc.relatedTo?.reqId && <button onClick={()=>{if(typeof window!=="undefined")window.dispatchEvent(new CustomEvent("oborotka:nav",{detail:{page:"pipeline"}}))}}
@@ -7198,54 +8994,239 @@ function DocumentDetailPage({docId, onBack, setToast}) {
 // PAGE 3: CLIENTS
 // ═══════════════════════════════════════
 function ClientsPage({pushNav, setToast}) {
+  const [topTab, setTopTab] = useState("clients"); // "clients" | "contractors"
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedClient, setSelectedClient] = useState(null);
 
-  const filtered = COMPANIES.filter(c=>{
-    if(filter==="creditors"&&c.role!=="creditor") return false;
-    if(filter==="debtors"&&c.role!=="debtor") return false;
-    if(search){const q=search.toLowerCase();return c.name.toLowerCase().includes(q)||c.unp.includes(q)}
+  // Show only creditors (companies that take factoring). Debtors are contractors, handled separately.
+  const creditors = COMPANIES.filter(c => c.role === "creditor");
+  const debtors = COMPANIES.filter(c => c.role === "debtor");
+
+  // Enrich creditors with computed status
+  const enriched = creditors.map(c => ({...c, computedStatus: getClientStatus(c, PIPELINE, STOPLIST)}));
+
+  // Debtors enriched with aggregate data from ASSIGNMENTS
+  const debtorsEnriched = debtors.map(d => {
+    const relatedAsgs = (typeof ASSIGNMENTS !== "undefined" ? ASSIGNMENTS : []).filter(a => a.debtorId === d.id);
+    const totalVolume = relatedAsgs.reduce((s, a) => s + (a.amount || 0), 0);
+    return {...d, assignmentCount: relatedAsgs.length, totalVolume};
+  });
+
+  const filteredClients = enriched.filter(c => {
+    if (filter !== "all" && c.computedStatus !== filter) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return c.name.toLowerCase().includes(q) || c.unp.includes(q);
+    }
     return true;
   });
 
-  if(selectedClient) return <ClientDetailView client={selectedClient} onBack={()=>setSelectedClient(null)} setToast={setToast}/>;
+  // Counts per category
+  const counts = {
+    all: enriched.length,
+    active: enriched.filter(c => c.computedStatus === "active").length,
+    inactive: enriched.filter(c => c.computedStatus === "inactive").length,
+    rejected: enriched.filter(c => c.computedStatus === "rejected").length,
+    grey_zone: enriched.filter(c => c.computedStatus === "grey_zone").length,
+    stoplist: enriched.filter(c => c.computedStatus === "stoplist").length,
+  };
+
+  const statusConfig = {
+    active:    {label:"Активный",         icon:"✅", color:B.green,    bg:B.greenL,   description:"Ген.договор подписан, может создавать уступки"},
+    inactive:  {label:"Неактивный",       icon:"⏳", color:B.yellow,   bg:B.yellowL,  description:"В процессе подписания ген.договора"},
+    rejected:  {label:"Отклонён",         icon:"✗",  color:B.red,      bg:B.redL,     description:"Отклонён скорингом или решением"},
+    grey_zone: {label:"Серая зона",       icon:"⚪", color:"#6B7280",  bg:"#F3F4F6",  description:"На ручном рассмотрении"},
+    stoplist:  {label:"Стоп-лист",        icon:"🚫", color:B.red,      bg:"#FECACA",  description:"В стоп-листе банка"},
+  };
+
+  if (selectedClient) return <ClientDetailView client={selectedClient} onBack={()=>setSelectedClient(null)} setToast={setToast}/>;
+
+  // ─── Contractors (debtors) list filtering ───
+  const filteredContractors = debtorsEnriched.filter(d => {
+    if (search) {
+      const q = search.toLowerCase();
+      return d.name.toLowerCase().includes(q) || d.unp.includes(q);
+    }
+    return true;
+  });
 
   return <div>
-    <PageHeader title="Клиенты" breadcrumbs={["Клиенты"]}/>
+    <PageHeader title={topTab === "clients" ? "Клиенты" : "Контрагенты-должники"}
+      breadcrumbs={["Клиенты", topTab === "contractors" ? "Контрагенты" : undefined].filter(Boolean)}/>
+
+    {/* Top tab selector: Clients (creditors) vs Contractors (debtors) */}
+    <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 mb-5 inline-flex">
+      <button onClick={()=>{setTopTab("clients"); setFilter("all");}}
+        className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${topTab==="clients"?"bg-white shadow-sm":"hover:text-slate-700"}`}
+        style={topTab==="clients" ? {color: B.accent} : {color: B.t3}}>
+        Клиенты (кредиторы)
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
+          style={topTab==="clients" ? {background: B.accentL, color: B.accent} : {background: "transparent", color: B.t3}}>
+          {enriched.length}
+        </span>
+      </button>
+      <button onClick={()=>setTopTab("contractors")}
+        className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${topTab==="contractors"?"bg-white shadow-sm":"hover:text-slate-700"}`}
+        style={topTab==="contractors" ? {color: B.purple} : {color: B.t3}}>
+        Контрагенты (должники)
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
+          style={topTab==="contractors" ? {background: B.purpleL, color: B.purple} : {background: "transparent", color: B.t3}}>
+          {debtorsEnriched.length}
+        </span>
+      </button>
+    </div>
+
+    {topTab === "clients" && <>
+
+    {/* KPI strip */}
+    <div className="grid grid-cols-5 gap-3 mb-5">
+      {["active", "inactive", "rejected", "grey_zone", "stoplist"].map(key => {
+        const cfg = statusConfig[key];
+        const isActive = filter === key;
+        return <button key={key} onClick={()=>setFilter(filter === key ? "all" : key)} className="text-left">
+          <Card className="p-3 hover:shadow-md transition-all cursor-pointer"
+            style={isActive ? {borderColor: cfg.color, borderWidth: 2} : {}}>
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 text-sm" style={{background: cfg.bg}}>
+                <span>{cfg.icon}</span>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-[10px] leading-tight" style={{color: B.t3}}>{cfg.label}</div>
+                <div className="text-lg font-black" style={{color: counts[key] > 0 ? cfg.color : B.t3}}>{counts[key]}</div>
+              </div>
+            </div>
+          </Card>
+        </button>;
+      })}
+    </div>
+
+    {/* Tabs + search */}
     <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
-      <TabFilter tabs={[{id:"all",label:"Все",badge:COMPANIES.length},{id:"creditors",label:"Кредиторы",badge:COMPANIES.filter(c=>c.role==="creditor").length},{id:"debtors",label:"Должники",badge:COMPANIES.filter(c=>c.role==="debtor").length}]} active={filter} onChange={setFilter}/>
+      <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 overflow-x-auto">
+        {[
+          {id:"all",       label:"Все",          badge:counts.all},
+          {id:"active",    label:"Активные",     badge:counts.active},
+          {id:"inactive",  label:"Неактивные",   badge:counts.inactive},
+          {id:"rejected",  label:"Отклонены",    badge:counts.rejected},
+          {id:"grey_zone", label:"Серая зона",   badge:counts.grey_zone},
+          {id:"stoplist",  label:"Стоп-лист",    badge:counts.stoplist},
+        ].map(t => <button key={t.id} onClick={()=>setFilter(t.id)}
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${filter===t.id?"bg-white shadow-sm":"hover:text-slate-700"}`}
+          style={filter===t.id ? {color: statusConfig[t.id]?.color || B.t1} : {color: B.t3}}>
+          {t.label}
+          {t.badge != null && <span className="ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
+            style={filter===t.id ? {background: (statusConfig[t.id]?.color || B.accent)+"20", color: statusConfig[t.id]?.color || B.accent} : {background: "transparent", color: B.t3}}>
+            {t.badge}
+          </span>}
+        </button>)}
+      </div>
       <div className="w-64 shrink-0"><SearchBar value={search} onChange={setSearch} placeholder="Название, УНП..."/></div>
     </div>
 
+    {/* Active filter description */}
+    {filter !== "all" && <Card className="p-3 mb-4" style={{background: statusConfig[filter].bg, borderColor: statusConfig[filter].color+"40"}}>
+      <div className="flex items-center gap-2">
+        <span className="text-base">{statusConfig[filter].icon}</span>
+        <div>
+          <div className="text-xs font-bold" style={{color: statusConfig[filter].color}}>
+            {statusConfig[filter].label}
+          </div>
+          <div className="text-[10px]" style={{color: B.t2}}>
+            {statusConfig[filter].description}
+          </div>
+        </div>
+      </div>
+    </Card>}
+
     <Card className="overflow-hidden">
       <div className="overflow-x-auto">
-      <table className="w-full text-xs" style={{minWidth:750}}>
+      <table className="w-full text-xs" style={{minWidth:820}}>
         <thead><tr className="border-b border-slate-100" style={{background:"#F8FAFC"}}>
           <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Компания</th>
           <th className="px-2 py-2.5 text-left font-semibold" style={{color:B.t3}}>УНП</th>
-          <th className="px-2 py-2.5 text-left font-semibold" style={{color:B.t3}}>Роль</th>
           <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Скоринг</th>
           <th className="px-2 py-2.5 text-right font-semibold" style={{color:B.t3}}>Лимит</th>
           <th className="px-2 py-2.5 text-right font-semibold" style={{color:B.t3}}>Использ.</th>
           <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Ставка</th>
           <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Статус</th>
         </tr></thead>
-        <tbody>{filtered.map((c,i)=>{
+        <tbody>{filteredClients.map((c,i)=>{
           const sc2 = c.scoring ? scoringClass(c.scoring.total) : null;
+          const cfg = statusConfig[c.computedStatus];
           return <tr key={c.id} onClick={()=>setSelectedClient(c)} className={`border-b border-slate-50 cursor-pointer hover:bg-blue-50/50 transition-colors ${i%2===1?"bg-slate-50/30":""}`}>
             <td className="px-3 py-2.5 font-semibold" style={{color:B.t1}}>{c.name}</td>
             <td className="px-2 py-2.5 mono" style={{color:B.t2}}>{c.unp}</td>
-            <td className="px-2 py-2.5" style={{color:B.t2}}>{c.role==="creditor"?"Кредитор":"Должник"}</td>
             <td className="px-2 py-2.5 text-center">{sc2?<span className="font-bold px-2 py-0.5 rounded" style={{background:sc2.color+"18",color:sc2.color}}>{c.scoringClass}</span>:<span style={{color:B.t3}}>—</span>}</td>
             <td className="px-2 py-2.5 font-semibold text-right mono" style={{color:B.t1}}>{c.limit?fmtByn(c.limit):"—"}</td>
             <td className="px-2 py-2.5 text-right mono" style={{color:B.t2}}>{c.used!=null?fmtByn(c.used):"—"}</td>
             <td className="px-2 py-2.5 text-center mono" style={{color:B.t1}}>{c.rate?`${c.rate}%`:"—"}</td>
-            <td className="px-2 py-2.5 text-center"><StatusBadge status={c.status}/></td>
-          </tr>})}</tbody>
+            <td className="px-2 py-2.5 text-center">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold"
+                style={{background: cfg.bg, color: cfg.color}}>
+                <span>{cfg.icon}</span>{cfg.label}
+              </span>
+            </td>
+          </tr>})}
+          {filteredClients.length === 0 && <tr>
+            <td colSpan={7} className="p-10 text-center text-sm" style={{color: B.t3}}>
+              Клиенты не найдены
+            </td>
+          </tr>}
+        </tbody>
       </table>
       </div>
     </Card>
+    </>}
+
+    {topTab === "contractors" && <>
+      {/* Search only for contractors */}
+      <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
+        <div className="text-[11px]" style={{color:B.t2}}>
+          Контрагенты-должники — компании, по которым кредиторы получают уступки.
+          Здесь показан перечень с агрегатом по уступкам.
+        </div>
+        <div className="w-64 shrink-0"><SearchBar value={search} onChange={setSearch} placeholder="Название, УНП..."/></div>
+      </div>
+
+      <Card className="overflow-hidden">
+        <div className="overflow-x-auto">
+        <table className="w-full text-xs" style={{minWidth:820}}>
+          <thead><tr className="border-b border-slate-100" style={{background:"#F8FAFC"}}>
+            <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Название</th>
+            <th className="px-2 py-2.5 text-left font-semibold" style={{color:B.t3}}>УНП</th>
+            <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Скоринг</th>
+            <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Рейтинг</th>
+            <th className="px-2 py-2.5 text-right font-semibold" style={{color:B.t3}}>Кол-во уступок</th>
+            <th className="px-2 py-2.5 text-right font-semibold" style={{color:B.t3}}>Общая сумма</th>
+          </tr></thead>
+          <tbody>{filteredContractors.map((d,i)=>{
+            const sc2 = d.scoring ? scoringClass(d.scoring.total) : null;
+            return <tr key={d.id} onClick={()=>setSelectedClient(d)} className={`border-b border-slate-50 cursor-pointer hover:bg-blue-50/50 transition-colors ${i%2===1?"bg-slate-50/30":""}`}>
+              <td className="px-3 py-2.5 font-semibold" style={{color:B.t1}}>{d.name}</td>
+              <td className="px-2 py-2.5 mono" style={{color:B.t2}}>{d.unp}</td>
+              <td className="px-2 py-2.5 text-center">{sc2?<span className="font-bold px-2 py-0.5 rounded" style={{background:sc2.color+"18",color:sc2.color}}>{d.scoringClass}</span>:<span style={{color:B.t3}}>—</span>}</td>
+              <td className="px-2 py-2.5 text-center" style={{color:B.t2}}>
+                {d.rating ? <span className="font-bold">{d.rating}/5</span> : <span style={{color:B.t3}}>—</span>}
+              </td>
+              <td className="px-2 py-2.5 text-right mono font-semibold" style={{color: d.assignmentCount > 0 ? B.accent : B.t3}}>
+                {d.assignmentCount || 0}
+              </td>
+              <td className="px-2 py-2.5 text-right mono font-bold" style={{color: d.totalVolume > 0 ? B.t1 : B.t3}}>
+                {d.totalVolume > 0 ? fmtByn(d.totalVolume) : "—"}
+              </td>
+            </tr>;
+          })}
+          {filteredContractors.length === 0 && <tr>
+            <td colSpan={6} className="p-10 text-center text-sm" style={{color: B.t3}}>
+              Контрагенты не найдены
+            </td>
+          </tr>}
+          </tbody>
+        </table>
+        </div>
+      </Card>
+    </>}
   </div>;
 }
 
@@ -7263,6 +9244,10 @@ function ClientDetailView({client, onBack, setToast}) {
     ? COMPANIES.filter(c=>c.role==="debtor"&&ALL_DEALS.some(d=>d.creditorId===client.id&&d.debtorId===c.id))
     : COMPANIES.filter(c=>c.role==="creditor"&&ALL_DEALS.some(d=>d.debtorId===client.id&&d.creditorId===c.id));
 
+  // Computed status + latest request for banner
+  const computedStatus = getClientStatus(client, PIPELINE, STOPLIST);
+  const latestRequest = getLatestClientRequest(client, PIPELINE);
+
   const historyLog = [
     {date:"2026-01-15", action:"Регистрация на платформе", user:"Система"},
     {date:"2026-01-16", action:`Лимит установлен: ${fmtByn(client.limit||0)}`, user:"Иванов А.С."},
@@ -7276,6 +9261,92 @@ function ClientDetailView({client, onBack, setToast}) {
         <Btn size="sm" variant="secondary" icon={TrendingUp} onClick={()=>setRateModal(true)}>Изменить ставку</Btn>
         <Btn size="sm" variant="danger" icon={Lock}>Заблокировать</Btn>
       </div>}/>
+
+    {/* ─── STATUS BANNERS ─── */}
+    {computedStatus === "inactive" && latestRequest && <Card className="p-4 mb-4" style={{background: B.yellowL, borderColor: B.yellow+"40"}}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-xs font-bold" style={{color: B.yellow}}>⏳ В процессе подписания ген.договора</div>
+          <div className="text-sm font-semibold mt-1" style={{color: B.t1}}>
+            Заявка <span className="mono">{latestRequest.id}</span> · этап: {PIPELINE_STAGES.find(s => s.id === latestRequest.stage)?.label || latestRequest.stage}
+          </div>
+          <div className="text-[10px] mt-1" style={{color: B.t2}}>
+            {getDaysOnStage(latestRequest)} раб.д на этапе
+            {getSlaLimit(latestRequest.stage, latestRequest.tier) && <> · SLA: {getSlaLimit(latestRequest.stage, latestRequest.tier)}д</>}
+          </div>
+        </div>
+        <Btn size="sm" variant="secondary" icon={ArrowRight}
+          onClick={()=>{if(typeof window!=="undefined") window.dispatchEvent(new CustomEvent("oborotka:nav", {detail:{page:"pipeline", reqId: latestRequest.id}}));}}>
+          К заявке
+        </Btn>
+      </div>
+    </Card>}
+
+    {computedStatus === "rejected" && latestRequest && <Card className="p-4 mb-4" style={{background: B.redL, borderColor: B.red+"40"}}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-xs font-bold" style={{color: B.red}}>✗ Клиент отклонён</div>
+          <div className="text-sm font-semibold mt-1" style={{color: B.t1}}>
+            Заявка <span className="mono">{latestRequest.id}</span>
+          </div>
+          {latestRequest.rejectReason && <div className="text-[10px] mt-1 italic" style={{color: B.t2}}>
+            Причина: «{latestRequest.rejectReason}»
+          </div>}
+          {latestRequest.rejectDate && <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+            Дата: {latestRequest.rejectDate}
+          </div>}
+        </div>
+        <Btn size="sm" variant="secondary" icon={RefreshCw}
+          onClick={()=>setToast&&setToast({msg:"Заявка возвращена на рассмотрение (mock)", type:"success"})}>
+          Рассмотреть повторно
+        </Btn>
+      </div>
+    </Card>}
+
+    {computedStatus === "grey_zone" && latestRequest && <Card className="p-4 mb-4" style={{background: "#F3F4F6", borderColor: "#D1D5DB"}}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-xs font-bold" style={{color: "#6B7280"}}>⚪ В серой зоне</div>
+          <div className="text-sm font-semibold mt-1" style={{color: B.t1}}>
+            Заявка <span className="mono">{latestRequest.id}</span> · балл {latestRequest.scoringTotal || "—"}/200
+          </div>
+          <div className="text-[10px] mt-1" style={{color: B.t2}}>
+            Требует ручного рассмотрения — автоскоринг не пропустил
+          </div>
+        </div>
+        <Btn size="sm" variant="secondary" icon={ArrowRight}
+          onClick={()=>{if(typeof window!=="undefined") window.dispatchEvent(new CustomEvent("oborotka:nav", {detail:{page:"pipeline", reqId: latestRequest.id}}));}}>
+          Рассмотреть
+        </Btn>
+      </div>
+    </Card>}
+
+    {computedStatus === "stoplist" && <Card className="p-4 mb-4" style={{background: "#FECACA", borderColor: B.red+"60", borderWidth: 2}}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-xs font-bold" style={{color: B.red}}>🚫 В стоп-листе банка</div>
+          <div className="text-[11px] mt-1" style={{color: B.t2}}>
+            Этот клиент в стоп-листе. Заявки от него автоматически отклоняются.
+          </div>
+        </div>
+        <Btn size="sm" variant="secondary" icon={ArrowRight}
+          onClick={()=>{if(typeof window!=="undefined") window.dispatchEvent(new CustomEvent("oborotka:nav", {detail:{page:"stoplist"}}));}}>
+          К стоп-листу
+        </Btn>
+      </div>
+    </Card>}
+
+    {computedStatus === "active" && clientActiveDeals.length > 0 && <Card className="p-4 mb-4" style={{background: B.greenL, borderColor: B.green+"40"}}>
+      <div className="flex items-center gap-3">
+        <CheckCircle size={18} style={{color: B.green}} className="shrink-0"/>
+        <div>
+          <div className="text-xs font-bold" style={{color: B.green}}>✅ Активный клиент</div>
+          <div className="text-[11px] mt-0.5" style={{color: B.t2}}>
+            Ген.договор факторинга подписан. Клиент может создавать уступки по лимиту {fmtByn(client.limit||0)}.
+          </div>
+        </div>
+      </div>
+    </Card>}
 
     <div className="grid gap-6" style={{gridTemplateColumns:"1fr 280px"}}>
       <div className="space-y-5 min-w-0">
@@ -7324,10 +9395,10 @@ function ClientDetailView({client, onBack, setToast}) {
                 <div className="flex items-center justify-between gap-3 mb-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="mono text-xs font-bold" style={{color: B.accent}}>{deal.id}</span>
-                    {deal.contractType && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold"
-                      style={{background: deal.contractType==="general"?B.accentL:B.purpleL, color: deal.contractType==="general"?B.accent:B.purple}}>
-                      {deal.contractType==="general"?"Ген.договор":"Разовый"}
-                    </span>}
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold"
+                      style={{background: B.accentL, color: B.accent}}>
+                      Ген.договор
+                    </span>
                   </div>
                   <div className="text-xs font-bold mono" style={{color: B.t1}}>{fmtByn(limit)}</div>
                 </div>
@@ -8040,7 +10111,6 @@ function DocumentTable({items, onSelect, setToast, batchMode, selectedIds, toggl
 // ─── Document templates ───
 const DOC_TEMPLATES = [
   {id:"tpl-gen", docType:"generalContract", label:"Генеральный договор факторинга", icon:"📜", description:"Основной договор с клиентом-поставщиком"},
-  {id:"tpl-onetime", docType:"onetimeContract", label:"Разовый договор", icon:"📝", description:"Для единичной сделки без открытия лимита"},
   {id:"tpl-ds", docType:"supplementaryAgreement", label:"Допсоглашение (ДС)", icon:"📄", description:"К конкретной уступке с определённой суммой"},
   {id:"tpl-notify", docType:"notification", label:"Уведомление об уступке", icon:"✉️", description:"Должнику о переходе прав требования"},
   {id:"tpl-act", docType:"actReconciliation", label:"Акт сверки", icon:"📊", description:"Для подтверждения задолженности"},
@@ -8144,7 +10214,7 @@ function BatchGenerateModal({open, onClose, onGenerate, assignments}) {
 function DocumentTypeHelp() {
   const [open, setOpen] = useState(false);
   const grouped = {
-    contracts: {label:"Договоры", types:["generalContract","onetimeContract","supplementaryAgreement","decision"]},
+    contracts: {label:"Договоры", types:["generalContract","supplementaryAgreement","decision"]},
     operational: {label:"Операционные", types:["dkp","ttn","actReconciliation","notification","esfchf"]},
     consents: {label:"Согласия и анкеты", types:["consentBki","consent_oeb","consent_pd","anketa"]},
     reports: {label:"Справки и отчёты", types:["balanceOpu","legat","bki","report"]},
@@ -8243,8 +10313,7 @@ function CardfileTab({setToast}) {
       const q = search.toLowerCase();
       if (!client.name.toLowerCase().includes(q) && !(client.unp||"").includes(q)) return false;
     }
-    if (contractTypeFilter === "general" && activeDeal?.contractType !== "general") return false;
-    if (contractTypeFilter === "onetime" && activeDeal?.contractType !== "onetime") return false;
+    if (contractTypeFilter === "with_contract" && !activeDeal) return false;
     if (contractTypeFilter === "closed" && activeDeal) return false;
     if (statusFilter === "expiring") {
       const hasExpiring = docs.some(d => d.validity?.daysRemaining != null && d.validity.daysRemaining >= 0 && d.validity.daysRemaining <= 7);
@@ -8263,9 +10332,8 @@ function CardfileTab({setToast}) {
       </div>
       <select value={contractTypeFilter} onChange={e=>setContractTypeFilter(e.target.value)}
         className="px-3 py-2 rounded-lg border text-xs bg-white" style={{borderColor:B.border, color:B.t1}}>
-        <option value="all">Все договоры</option>
-        <option value="general">Генеральные</option>
-        <option value="onetime">Разовые</option>
+        <option value="all">Все клиенты</option>
+        <option value="with_contract">С активным ген.договором</option>
         <option value="closed">Без активного договора</option>
       </select>
       <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
@@ -8320,7 +10388,7 @@ function ClientDocumentCard({client, docs, deal, setToast}) {
       <div className="shrink-0 text-right">
         <div className="text-[10px]" style={{color:B.t3}}>{docs.length} документов</div>
         {deal && <div className="text-[10px]" style={{color:B.accent}}>
-          {deal.contractType==="onetime"?"Разовый":"Генеральный"} · {fmtByn(deal.approvedLimit)}
+          Генеральный · {fmtByn(deal.approvedLimit)}
         </div>}
       </div>
     </button>
@@ -8328,9 +10396,9 @@ function ClientDocumentCard({client, docs, deal, setToast}) {
     {expanded && <div className="border-t px-4 py-3" style={{borderColor:B.border, background:"#FAFAFA"}}>
       {deal && <div className="text-[11px] mb-3 p-2 rounded-lg" style={{background:B.accentL+"30"}}>
         <strong style={{color:B.accent}}>
-          {deal.contractType==="onetime"?"Разовый договор":"Ген.договор"} — активен с {deal.stageStartDate}
+          Ген.договор — активен с {deal.stageStartDate}
         </strong>
-        {deal.contractType!=="onetime" && <span style={{color:B.t2}}> · Лимит {fmtByn(deal.approvedLimit)}</span>}
+        <span style={{color:B.t2}}> · Лимит {fmtByn(deal.approvedLimit)}</span>
       </div>}
 
       <div className="space-y-1.5">
@@ -9992,4 +12060,12 @@ function ScoringPage({setToast}) {
       </div>
     </Modal>
   </div>;
+}
+
+
+// ─── Default export: wrap AppInner with ErrorBoundary ───
+export default function App() {
+  return <ErrorBoundary>
+    <AppInner/>
+  </ErrorBoundary>;
 }
