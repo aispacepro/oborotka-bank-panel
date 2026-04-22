@@ -971,7 +971,7 @@ const DOCUMENTS_REGISTRY = [
    category:"assignment",
    relatedTo:{assignmentId:"ASG-004", reqId:"REQ-010", clientId:1, company:"ООО «СитиБетонСтрой»", generalContractId:"DOC-GEN-001"},
    status:"pending_bank", fileFormat:"PDF", fileSize:"108 KB",
-   version:1, previousVersionId:null,
+   version:2, previousVersionId:"DOC-SUPAG-004-V1",
    validity:{issueDate:"2026-03-25", expiresAt:null, daysRemaining:null},
    signatureChain:[
      {party:"creditor", label:"Кредитор", status:"signed", signedBy:"ООО «СитиБетонСтрой»", signedAt:"2026-03-25 10:00", method:"ЭЦП клиента"},
@@ -980,8 +980,27 @@ const DOCUMENTS_REGISTRY = [
    ],
    createdAt:"2026-03-25 09:30", createdBy:"Петрова Н.А. (УСКО)",
    history:[
-     {action:"generated",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-25 09:30"},
+     {action:"generated",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-25 09:30", comment: "Повторная генерация — исправлена сумма"},
      {action:"signed_client",user:"ООО «СитиБетонСтрой»",userRole:"supplier",date:"2026-03-25 10:00"},
+   ]},
+
+  // ─── Предыдущая (вернули на доработку) версия DOC-SUPAG-004 ───
+  {id:"DOC-SUPAG-004-V1", docType:"supplementaryAgreement", title:"Допсоглашение №04 (v1, возвращено)",
+   category:"assignment",
+   relatedTo:{assignmentId:"ASG-004", reqId:"REQ-010", clientId:1, company:"ООО «СитиБетонСтрой»", generalContractId:"DOC-GEN-001"},
+   status:"rejected", fileFormat:"PDF", fileSize:"107 KB",
+   version:1, previousVersionId:null,
+   validity:{issueDate:"2026-03-24", expiresAt:null, daysRemaining:null},
+   signatureChain:[
+     {party:"creditor", label:"Кредитор", status:"signed", signedBy:"ООО «СитиБетонСтрой»", signedAt:"2026-03-24 15:00", method:"ЭЦП клиента"},
+     {party:"bank", label:"Банк", status:"rejected", signedBy:"Татьяна К.", signedAt:"2026-03-25 09:10", method:"Возврат УСКО"},
+     {party:"debtor", label:"Должник", status:"na"},
+   ],
+   createdAt:"2026-03-24 14:00", createdBy:"Петрова Н.А. (УСКО)",
+   history:[
+     {action:"generated",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-24 14:00"},
+     {action:"signed_client",user:"ООО «СитиБетонСтрой»",userRole:"supplier",date:"2026-03-24 15:00"},
+     {action:"returned",user:"Татьяна К.",userRole:"signer",date:"2026-03-25 09:10",comment:"Неверная сумма в ДС: указано 18 000, должно быть 18 500"},
    ]},
 
   {id:"DOC-SUPAG-006", docType:"supplementaryAgreement", title:"Допсоглашение №06 к ГД №1 (ASG-006)",
@@ -1390,34 +1409,201 @@ const Card = ({children, className="", ...rest}) => (
   <div className={`bg-white rounded-2xl border border-slate-200 ${className}`} {...rest}>{children}</div>
 );
 
-const Btn = ({children,variant="primary",size="md",onClick,disabled,icon:Icon,className=""}) => {
+const Btn = ({children, variant = "primary", size = "md", onClick, disabled, icon: Icon, className = "", rateLimit = 500}) => {
+  const [cooldown, setCooldown] = useState(false);
   const base = "inline-flex items-center justify-center gap-2 font-semibold rounded-xl transition-all duration-200 whitespace-nowrap";
-  const sz = {sm:"px-3 py-1.5 text-xs",md:"px-5 py-2.5 text-sm",lg:"px-6 py-3 text-base"}[size];
+  const sz = {sm: "px-3 py-1.5 text-xs", md: "px-5 py-2.5 text-sm", lg: "px-6 py-3 text-base"}[size];
+  const isDisabled = disabled || cooldown;
   const vars = {
-    primary:`text-white shadow-sm ${disabled?"opacity-50 cursor-not-allowed":"hover:shadow-md hover:-translate-y-0.5"}`,
-    secondary:"bg-slate-100 text-slate-700 hover:bg-slate-200",
-    ghost:"text-slate-600 hover:bg-slate-100",
-    success:`text-white ${disabled?"opacity-50":"hover:-translate-y-0.5"}`,
-    danger:"bg-red-50 text-red-600 hover:bg-red-100"
+    primary: `text-white shadow-sm ${isDisabled ? "opacity-50 cursor-not-allowed" : "hover:shadow-md hover:-translate-y-0.5"}`,
+    secondary: `bg-slate-100 text-slate-700 ${isDisabled ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-200"}`,
+    ghost: `text-slate-600 ${isDisabled ? "opacity-50 cursor-not-allowed" : "hover:bg-slate-100"}`,
+    success: `text-white ${isDisabled ? "opacity-50 cursor-not-allowed" : "hover:-translate-y-0.5"}`,
+    danger: `bg-red-50 text-red-600 ${isDisabled ? "opacity-50 cursor-not-allowed" : "hover:bg-red-100"}`,
   }[variant];
-  const bg = variant==="primary"?{background:B.accent}:variant==="success"?{background:B.green}:undefined;
-  return <button onClick={disabled?undefined:onClick} className={`${base} ${sz} ${vars} ${className}`} style={bg}>{Icon&&<Icon size={size==="sm"?14:16}/>}{children}</button>;
+  const bg = variant === "primary" ? {background: B.accent} : variant === "success" ? {background: B.green} : undefined;
+
+  const handleClick = (e) => {
+    if (isDisabled || !onClick) return;
+    onClick(e);
+    if (rateLimit > 0) {
+      setCooldown(true);
+      setTimeout(() => setCooldown(false), rateLimit);
+    }
+  };
+
+  return <button onClick={handleClick} disabled={isDisabled} className={`${base} ${sz} ${vars} ${className}`} style={bg}>
+    {Icon && <Icon size={size === "sm" ? 14 : 16}/>}
+    {children}
+  </button>;
 };
 
 const Modal = ({open,onClose,title,children,wide}) => {
   if(!open) return null;
   return <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:9999,overflow:"auto",background:"rgba(0,0,0,0.4)",backdropFilter:"blur(4px)",display:"flex",alignItems:"flex-start",justifyContent:"center",paddingTop:48,paddingBottom:48}} onClick={onClose}>
     <div className={`bg-white rounded-2xl shadow-2xl ${wide?"w-full max-w-3xl":"w-full max-w-lg"} flex flex-col mx-4`} style={{maxHeight:"85vh"}} onClick={e=>e.stopPropagation()}>
-      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0"><h2 className="text-lg font-bold" style={{color:B.t1}}>{title}</h2><button onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100"><X size={20} className="text-slate-400"/></button></div>
+      <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 shrink-0"><h2 className="text-lg font-bold" style={{color:B.t1}}>{title}</h2><button aria-label="Закрыть окно" onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100"><X size={20} className="text-slate-400"/></button></div>
       <div className="p-6 overflow-y-auto flex-1">{children}</div>
     </div>
   </div>;
 };
 
-const Toast = ({message,type="success",onClose}) => {
-  useEffect(()=>{const t=setTimeout(onClose,3000);return()=>clearTimeout(t)},[onClose]);
-  const bg = type==="success"?B.green:type==="error"?B.red:B.accent;
-  return <div className="fixed top-6 right-6 z-[100]"><div className="flex items-center gap-3 px-5 py-3 rounded-xl text-white text-sm font-medium shadow-lg" style={{background:bg}}>{type==="success"?<CheckCircle size={18}/>:<Info size={18}/>}{message}</div></div>;
+// ─── EmptyState — standardized empty state with icon + message + optional CTA ───
+const EmptyState = ({icon: Icon = Inbox, title = "Нет данных", subtitle, action, actionLabel}) => (
+  <div className="flex flex-col items-center justify-center py-14 px-6 text-center">
+    <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3" style={{background: "#F1F5F9"}}>
+      <Icon size={24} style={{color: B.t3}}/>
+    </div>
+    <div className="text-sm font-semibold mb-1" style={{color: B.t1}}>{title}</div>
+    {subtitle && <div className="text-[11px] mb-3 max-w-xs" style={{color: B.t3}}>{subtitle}</div>}
+    {action && actionLabel && <Btn size="sm" variant="secondary" onClick={action}>{actionLabel}</Btn>}
+  </div>
+);
+
+// ─── TableSkeleton — placeholder while data loads ───
+const TableSkeleton = ({rows = 5, cols = 6}) => (
+  <div className="p-4 animate-pulse">
+    <div className="space-y-2">
+      {Array.from({length: rows}).map((_, i) => (
+        <div key={i} className="flex gap-2">
+          {Array.from({length: cols}).map((_, j) => (
+            <div key={j} className="h-8 rounded" style={{background: "#F1F5F9", flex: 1}}/>
+          ))}
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+// ─── usePagination — reusable pagination state + slicing ───
+function usePagination(items, pageSize = 25) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil((items?.length || 0) / pageSize));
+
+  // Reset to page 1 when filters change (items length shrinks)
+  useEffect(() => {
+    if (page > totalPages) setPage(1);
+  }, [totalPages, page]);
+
+  const slicedItems = items ? items.slice((page - 1) * pageSize, page * pageSize) : [];
+  return {page, setPage, totalPages, slicedItems, total: items?.length || 0};
+}
+
+// ─── Pagination UI component ───
+const Pagination = ({page, setPage, totalPages, total, pageSize = 25}) => {
+  if (totalPages <= 1) return null;
+  const startIdx = (page - 1) * pageSize + 1;
+  const endIdx = Math.min(page * pageSize, total);
+  return <div className="flex items-center justify-between px-3 py-2 border-t text-xs" style={{borderColor: B.border, background: "#F8FAFC"}}>
+    <div style={{color: B.t3}}>
+      {startIdx}–{endIdx} из {total}
+    </div>
+    <div className="flex items-center gap-1">
+      <button disabled={page === 1} onClick={() => setPage(1)}
+        className="px-2 py-1 rounded text-[10px] font-semibold disabled:opacity-30 hover:bg-white"
+        style={{color: B.t2}}>«</button>
+      <button disabled={page === 1} onClick={() => setPage(p => Math.max(1, p - 1))}
+        className="px-2 py-1 rounded text-[10px] font-semibold disabled:opacity-30 hover:bg-white"
+        style={{color: B.t2}}>‹</button>
+      <span className="px-3 py-1 rounded font-bold text-[11px]" style={{background: B.accentL, color: B.accent}}>
+        {page} / {totalPages}
+      </span>
+      <button disabled={page === totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+        className="px-2 py-1 rounded text-[10px] font-semibold disabled:opacity-30 hover:bg-white"
+        style={{color: B.t2}}>›</button>
+      <button disabled={page === totalPages} onClick={() => setPage(totalPages)}
+        className="px-2 py-1 rounded text-[10px] font-semibold disabled:opacity-30 hover:bg-white"
+        style={{color: B.t2}}>»</button>
+    </div>
+  </div>;
+};
+
+// ─── exportToCSV — download data as CSV (opens in Excel) ───
+// columns: [{key, label, formatter?}]
+function exportToCSV(filename, columns, rows) {
+  const escape = (v) => {
+    if (v == null) return "";
+    const s = String(v);
+    if (s.includes(";") || s.includes('"') || s.includes("\n")) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
+  const header = columns.map(c => escape(c.label)).join(";");
+  const body = rows.map(r => columns.map(c => {
+    const v = c.formatter ? c.formatter(r) : r[c.key];
+    return escape(v);
+  }).join(";")).join("\n");
+  const csv = "\uFEFF" + header + "\n" + body; // BOM for Excel cyrillic
+  try {
+    const blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${filename}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return true;
+  } catch(e) {
+    console.error("CSV export failed", e);
+    return false;
+  }
+}
+
+// ─── ExportButton — reusable button to export current data to CSV ───
+const ExportButton = ({filename, columns, rows, setToast, disabled}) => {
+  const handleExport = () => {
+    if (rows.length === 0) {
+      setToast && setToast({msg: "Нет данных для экспорта", type: "warning"});
+      return;
+    }
+    const ok = exportToCSV(filename, columns, rows);
+    if (ok) setToast && setToast({msg: `Экспортировано: ${rows.length} строк в ${filename}.csv`, type: "success"});
+    else setToast && setToast({msg: "Ошибка экспорта", type: "error"});
+  };
+  return <Btn size="sm" variant="ghost" icon={Download} onClick={handleExport} disabled={disabled || rows.length === 0}>
+    Excel
+  </Btn>;
+};
+
+const Toast = ({message, type = "success", onClose, onUndo, actionLabel = "Отменить"}) => {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const delay = onUndo ? 8000 : 3500;
+    const t = setTimeout(() => {
+      setVisible(false);
+      setTimeout(onClose, 300);
+    }, delay);
+    return () => clearTimeout(t);
+  }, [onClose, onUndo]);
+
+  const config = {
+    success: {bg: B.green, icon: CheckCircle, label: "Готово"},
+    error:   {bg: B.red, icon: XCircle, label: "Ошибка"},
+    info:    {bg: B.accent, icon: Info, label: "Инфо"},
+    warning: {bg: B.yellow, icon: AlertTriangle, label: "Внимание"},
+  };
+  const cfg = config[type] || config.info;
+  const Icon = cfg.icon;
+
+  return <div className="fixed bottom-6 right-6 z-[100] transition-all duration-300"
+    style={{opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(20px)"}}>
+    <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl text-white text-sm font-medium shadow-xl min-w-[280px] max-w-md"
+      style={{background: cfg.bg}}>
+      <Icon size={18} className="shrink-0"/>
+      <span className="flex-1">{message}</span>
+      {onUndo && <button onClick={() => {onUndo(); setVisible(false); setTimeout(onClose, 300);}}
+        className="px-2.5 py-1 rounded-lg text-xs font-bold bg-white/20 hover:bg-white/30 transition-colors shrink-0">
+        {actionLabel}
+      </button>}
+      <button aria-label="Закрыть уведомление" onClick={() => {setVisible(false); setTimeout(onClose, 300);}}
+        className="text-white/70 hover:text-white shrink-0">
+        <X size={14}/>
+      </button>
+    </div>
+  </div>;
 };
 
 const InfoTooltip = ({text,children}) => {
@@ -1451,17 +1637,29 @@ const StatusBadge = ({status,size="sm"}) => {
   return <span className={`inline-flex items-center px-2.5 py-1 rounded-lg font-semibold ${size==="sm"?"text-xs":"text-sm"}`} style={{background:s.bg,color:s.color}}>{s.label}</span>;
 };
 
-const KPICard = ({label,value,sub,icon:Icon,color,trend,tooltip}) => (
+const KPICard = ({label, value, sub, icon: Icon, color, trend, trendLabel = "vs прошлый месяц", tooltip, periodValue}) => (
   <Card className="p-5">
     <div className="flex items-start justify-between mb-3">
-      <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{background:color+"18"}}><Icon size={20} style={{color}}/></div>
-      {trend&&<span className={`text-xs font-semibold flex items-center gap-0.5 ${trend>0?"text-emerald-600":"text-red-500"}`}>{trend>0?<ArrowUpRight size={14}/>:<ArrowDownRight size={14}/>}{Math.abs(trend)}%</span>}
+      <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{background: color + "18"}}>
+        <Icon size={20} style={{color}}/>
+      </div>
+      {trend != null && <div className="flex flex-col items-end">
+        <span className={`text-xs font-semibold flex items-center gap-0.5 ${trend > 0 ? "text-emerald-600" : trend < 0 ? "text-red-500" : "text-slate-400"}`}>
+          {trend > 0 ? <ArrowUpRight size={14}/> : trend < 0 ? <ArrowDownRight size={14}/> : "—"}
+          {trend !== 0 ? Math.abs(trend) + "%" : "—"}
+        </span>
+        <span className="text-[9px]" style={{color: B.t3}}>{trendLabel}</span>
+      </div>}
     </div>
-    <div className="text-2xl font-bold mb-1" style={{color:B.t1,fontFamily:"'Plus Jakarta Sans',sans-serif"}}>{value}</div>
-    <div className="text-xs font-medium flex items-center gap-1" style={{color:B.t2}}>
-      {tooltip?<InfoTooltip text={tooltip}>{label}</InfoTooltip>:label}
+    <div className="text-2xl font-bold mb-1" style={{color: B.t1, fontFamily: "'Plus Jakarta Sans',sans-serif"}}>{value}</div>
+    <div className="text-xs font-medium flex items-center gap-1" style={{color: B.t2}}>
+      {tooltip ? <InfoTooltip text={tooltip}>{label}</InfoTooltip> : label}
     </div>
-    {sub&&<div className="text-xs mt-1" style={{color:B.t3}}>{sub}</div>}
+    {sub && <div className="text-xs mt-1" style={{color: B.t3}}>{sub}</div>}
+    {periodValue != null && <div className="text-[10px] mt-2 pt-2 border-t flex justify-between" style={{color: B.t3, borderColor: B.border}}>
+      <span>Было месяц назад:</span>
+      <span className="mono font-semibold" style={{color: B.t2}}>{periodValue}</span>
+    </div>}
   </Card>
 );
 
@@ -1689,14 +1887,102 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+// ─── PageErrorBoundary — per-page isolated error boundary ───
+// Catches errors within a page without crashing the whole app.
+// User can go to another page via sidebar.
+class PageErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {hasError: false, error: null};
+  }
+  static getDerivedStateFromError(error) {
+    return {hasError: true, error};
+  }
+  componentDidCatch(error, info) {
+    console.error(`PageErrorBoundary (${this.props.pageName || "unknown"}) caught:`, error, info);
+  }
+  resetError = () => {
+    this.setState({hasError: false, error: null});
+  };
+  render() {
+    if (this.state.hasError) {
+      return <div className="p-6">
+        <div className="max-w-lg mx-auto p-6 rounded-2xl bg-white border shadow-sm" style={{borderColor: "#FECACA"}}>
+          <div className="flex items-start gap-3 mb-3">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{background: "#FEE2E2"}}>
+              <AlertTriangle size={20} style={{color: "#DC2626"}}/>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-bold" style={{color: "#DC2626"}}>
+                Ошибка на странице «{this.props.pageName || "?"}»
+              </h2>
+              <p className="text-xs mt-1" style={{color: "#64748B"}}>
+                Эта страница не загрузилась. Остальные разделы доступны через боковое меню.
+              </p>
+            </div>
+          </div>
+          <pre className="text-[10px] p-2 rounded-lg overflow-x-auto mb-3" style={{background: "#F8FAFC", color: "#475569"}}>
+            {this.state.error?.message || "Неизвестная ошибка"}
+          </pre>
+          <div className="flex gap-2">
+            <button onClick={this.resetError}
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold text-white"
+              style={{background: "#1E40AF"}}>
+              Попробовать ещё раз
+            </button>
+            <button onClick={() => window.location.reload()}
+              className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold border"
+              style={{borderColor: "#E2E8F0", color: "#475569"}}>
+              Перезагрузить
+            </button>
+          </div>
+        </div>
+      </div>;
+    }
+    return this.props.children;
+  }
+}
+
 function AppInner() {
-  const [active, setActive] = useState("dashboard");
+  // Initialize `active` from URL hash, fallback to dashboard
+  const getInitialPage = () => {
+    try {
+      const hash = window.location.hash.replace(/^#\/?/, "");
+      const validPages = ["dashboard", "pipeline", "assignments", "clients", "portfolio", "documents", "stoplist", "scoring-admin", "audit-log", "settings", "overdue", "rates", "abs", "document-detail", "client-detail", "deal-detail"];
+      if (hash && validPages.includes(hash)) return hash;
+    } catch(e) {}
+    return "dashboard";
+  };
+
+  const [active, setActiveRaw] = useState(getInitialPage);
+  // Wrapped setter that also updates URL hash
+  const setActive = useCallback((page) => {
+    setActiveRaw(page);
+    try {
+      if (page && page !== "dashboard") {
+        window.history.pushState({page}, "", `#/${page}`);
+      } else {
+        window.history.pushState({page: "dashboard"}, "", window.location.pathname);
+      }
+    } catch(e) {}
+  }, []);
+
+  // Sync state on browser back/forward
+  useEffect(() => {
+    const handlePopState = (e) => {
+      const page = e.state?.page || getInitialPage();
+      setActiveRaw(page);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   const [navStack, setNavStack] = useState([]);
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = usePersistedState("dark-mode", false, v => v === true || v === false);
   const [toast, setToast] = useState(null);
   const [globalSearch, setGlobalSearch] = useState(false);
   const [gsQuery, setGsQuery] = useState("");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = usePersistedState("sidebar-open", true, v => v === true || v === false);
   const [selectedDocId, setSelectedDocId] = useState(null);
 
   // ─── UX REDESIGN: Favorites (pipeline) ───
@@ -1714,20 +2000,113 @@ function AppInner() {
     });
   }, []);
 
-  // ─── UX REDESIGN: New task indicator (sidebar pulse) ───
+  // ─── UX REDESIGN: New task indicator (sidebar pulse + toast + tab title badge) ───
   const [newTaskIndicator, setNewTaskIndicator] = useState({});
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+
+  // ─── Simple event tracker (writes to sessionStorage, ready for PostHog/Plausible integration) ───
+  const trackEvent = useCallback((eventName, props = {}) => {
+    try {
+      const event = {
+        name: eventName,
+        props,
+        timestamp: new Date().toISOString(),
+        user: currentUser?.name,
+        role: currentUser?.role,
+      };
+      const key = "oborotka-events";
+      const existing = JSON.parse(sessionStorage.getItem(key) || "[]");
+      existing.push(event);
+      if (existing.length > 200) existing.shift(); // Keep last 200
+      sessionStorage.setItem(key, JSON.stringify(existing));
+    } catch(e) {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Track page visits (must be AFTER trackEvent declaration to avoid TDZ)
+  useEffect(() => {
+    if (active) trackEvent("page_view", {page: active});
+  }, [active, trackEvent]);
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [soundEnabled, setSoundEnabled] = usePersistedState("notifications-sound", false, v => v === true || v === false);
+
   useEffect(() => {
     const handler = (e) => {
-      if (e.detail?.module) {
-        setNewTaskIndicator(prev => ({...prev, [e.detail.module]: true}));
-        setTimeout(() => {
-          setNewTaskIndicator(prev => ({...prev, [e.detail.module]: false}));
-        }, 6000);
+      if (!e.detail?.module) return;
+      const module = e.detail.module;
+
+      // 1. Pulse badge in sidebar
+      setNewTaskIndicator(prev => ({...prev, [module]: true}));
+      setTimeout(() => {
+        setNewTaskIndicator(prev => ({...prev, [module]: false}));
+      }, 6000);
+
+      // 2. Increment unread counter
+      setUnreadCount(prev => prev + 1);
+
+      // 3. Show toast with navigation action — only if user is NOT currently on that module
+      if (active !== module) {
+        const moduleLabels = {
+          pipeline: "заявка в конвейере",
+          assignments: "уступка",
+          documents: "документ",
+        };
+        const label = moduleLabels[module] || "задача";
+        setToast({
+          msg: `🆕 Новая ${label}`,
+          type: "info",
+          actionLabel: "Открыть",
+          onUndo: () => {
+            setActive(module);
+            setUnreadCount(0);
+          },
+        });
+      }
+
+      // 4. Optional sound (silent by default unless user enables in settings)
+      if (soundEnabled) {
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.frequency.value = 880;
+          gain.gain.setValueAtTime(0.1, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.15);
+        } catch(e) {}
       }
     };
     window.addEventListener("oborotka:new-task", handler);
     return () => window.removeEventListener("oborotka:new-task", handler);
-  }, []);
+  }, [active, soundEnabled]);
+
+  // Update document title with unread count
+  useEffect(() => {
+    try {
+      const baseTitle = "Oborotka.by — Банковская панель";
+      document.title = unreadCount > 0 ? `(${unreadCount}) ${baseTitle}` : baseTitle;
+    } catch(e) {}
+  }, [unreadCount]);
+
+  // Clear unread count when user navigates
+  useEffect(() => {
+    if (unreadCount > 0) {
+      const t = setTimeout(() => setUnreadCount(0), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [active, unreadCount]);
 
   // Demo: imitate new tasks every 30s
   useEffect(() => {
@@ -1813,22 +2192,131 @@ function AppInner() {
     });
   }, []);
 
-  // Cmd+K
+  // Cmd+K for global search, ? for help, ESC closes modals, g+n for navigation
+  const [helpModal, setHelpModal] = useState(false);
+  const [gPressed, setGPressed] = useState(false);
   useEffect(()=>{
-    const h = e => {if((e.metaKey||e.ctrlKey)&&e.key==="k"){e.preventDefault();setGlobalSearch(true);setGsQuery("")}};
-    window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);
-  },[]);
+    const h = e => {
+      // Cmd+K / Ctrl+K — open global search
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setGlobalSearch(true);
+        setGsQuery("");
+        return;
+      }
+      // Skip navigation hotkeys when typing in input
+      if (e.target.matches("input,textarea,select")) return;
 
-  // Global search results
-  const gsResults = useMemo(()=>{
-    if(!gsQuery.trim()) return [];
+      // ? — open help modal
+      if (e.key === "?") {
+        e.preventDefault();
+        setHelpModal(true);
+        return;
+      }
+      // ESC — close open modals
+      if (e.key === "Escape") {
+        if (globalSearch) setGlobalSearch(false);
+        else if (helpModal) setHelpModal(false);
+        setGPressed(false);
+        return;
+      }
+      // "g" — navigation prefix (then d/p/a/c/o/s/u)
+      if (e.key === "g" && !e.metaKey && !e.ctrlKey) {
+        setGPressed(true);
+        setTimeout(() => setGPressed(false), 2000);
+        return;
+      }
+      if (gPressed) {
+        const navMap = {
+          d: "dashboard", p: "pipeline", a: "assignments", c: "clients",
+          o: "overdue", s: "stoplist", u: "audit-log", r: "portfolio",
+        };
+        const target = navMap[e.key];
+        if (target) {
+          e.preventDefault();
+          setActive(target);
+          setGPressed(false);
+        }
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [globalSearch, helpModal, gPressed, setActive]);
+
+  // Global search results — groups: Заявки, Уступки, Клиенты, Сделки, Документы
+  const gsResults = useMemo(() => {
+    if (!gsQuery.trim()) return [];
     const q = gsQuery.toLowerCase();
-    const results = [];
-    COMPANIES.forEach(c=>{if(c.name.toLowerCase().includes(q)||c.unp.includes(q)) results.push({label:c.name,sub:`УНП ${c.unp} · ${c.role==="creditor"?"Кредитор":"Должник"}`,page:"clients",icon:Users})});
-    ALL_DEALS.forEach(d=>{if(d.id.toLowerCase().includes(q)) results.push({label:d.id,sub:`${fmtByn(d.amount)} · ${getCreditorName(d.creditorId)}`,page:"portfolio",icon:TrendingUp})});
-    PIPELINE.forEach(p=>{if(p.id.toLowerCase().includes(q)||p.company?.toLowerCase().includes(q)) results.push({label:p.id,sub:p.company||`Финансирование ${p.dealId}`,page:"pipeline",icon:Zap})});
-    return results.slice(0,8);
-  },[gsQuery]);
+    const groups = {pipeline: [], assignments: [], clients: [], deals: [], documents: []};
+
+    // Companies (clients)
+    COMPANIES.forEach(c => {
+      if (c.name.toLowerCase().includes(q) || c.unp.includes(q)) {
+        groups.clients.push({
+          label: c.name,
+          sub: `УНП ${c.unp} · ${c.role === "creditor" ? "Кредитор" : "Должник"}`,
+          page: "clients", icon: Users, type: "client", id: c.id,
+        });
+      }
+    });
+
+    // Pipeline requests
+    PIPELINE.forEach(p => {
+      if (p.id.toLowerCase().includes(q) || p.company?.toLowerCase().includes(q) || p.unp?.includes(q)) {
+        groups.pipeline.push({
+          label: p.id,
+          sub: `${p.company || "—"} · ${PIPELINE_STAGES.find(s => s.id === p.stage)?.label || p.stage}`,
+          page: "pipeline", icon: Zap, type: "pipeline", id: p.id,
+        });
+      }
+    });
+
+    // Assignments
+    ASSIGNMENTS.forEach(a => {
+      const creditor = COMPANIES.find(c => c.id === a.creditorId);
+      const debtor = COMPANIES.find(c => c.id === a.debtorId);
+      if (a.id.toLowerCase().includes(q)
+        || a.dealId?.toLowerCase().includes(q)
+        || a.ttnNumber?.toLowerCase().includes(q)
+        || creditor?.name?.toLowerCase().includes(q)
+        || debtor?.name?.toLowerCase().includes(q)) {
+        groups.assignments.push({
+          label: a.id,
+          sub: `${creditor?.name || "—"} → ${debtor?.name || "—"} · ${fmtByn(a.amount || 0)}`,
+          page: "assignments", icon: Package, type: "assignment", id: a.id,
+        });
+      }
+    });
+
+    // Deals (portfolio)
+    ALL_DEALS.forEach(d => {
+      if (d.id.toLowerCase().includes(q)) {
+        groups.deals.push({
+          label: d.id,
+          sub: `${fmtByn(d.amount)} · ${getCreditorName(d.creditorId)}`,
+          page: "portfolio", icon: TrendingUp, type: "deal", id: d.id,
+        });
+      }
+    });
+
+    // Documents
+    if (typeof DOCUMENTS_REGISTRY !== "undefined") {
+      DOCUMENTS_REGISTRY.forEach(d => {
+        if (d.id?.toLowerCase().includes(q) || d.name?.toLowerCase().includes(q)) {
+          groups.documents.push({
+            label: d.id || d.name,
+            sub: `${d.type || "—"} · ${d.stage || "—"}`,
+            page: "documents", icon: FileText, type: "document", id: d.id,
+          });
+        }
+      });
+    }
+
+    // Cap each group at 5
+    Object.keys(groups).forEach(k => { groups[k] = groups[k].slice(0, 5); });
+
+    return groups;
+  }, [gsQuery]);
 
   const themeClass = dark ? "bg-slate-900" : "";
   const mainBg = dark ? "#0F172A" : B.bg;
@@ -1884,7 +2372,7 @@ function AppInner() {
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
         <header className="h-14 shrink-0 flex items-center justify-between px-6 border-b" style={{background:cardBg,borderColor:B.border}}>
-          <button onClick={()=>setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-slate-100"><LayoutDashboard size={16} style={{color:B.t2}}/></button>
+          <button aria-label={sidebarOpen ? "Свернуть боковое меню" : "Развернуть боковое меню"} onClick={()=>setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-slate-100"><LayoutDashboard size={16} style={{color:B.t2}}/></button>
           <div className="flex items-center gap-3">
             <RoleSwitcherHeader currentUser={currentUser} onChange={changeRole}/>
             <button onClick={()=>{setGlobalSearch(true);setGsQuery("")}} className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-400 hover:border-slate-300">
@@ -1893,13 +2381,24 @@ function AppInner() {
             <NotificationBell currentUser={currentUser} notifications={NOTIFICATIONS} onNotificationClick={(notif)=>{
               if(notif.link?.page) setActive(notif.link.page);
             }}/>
-            <button onClick={()=>setDark(!dark)} className="p-2 rounded-lg hover:bg-slate-100">{dark?<ToggleRight size={16} style={{color:B.accent}}/>:<ToggleLeft size={16} style={{color:B.t3}}/>}</button>
+            <button aria-label={dark ? "Выключить тёмную тему" : "Включить тёмную тему"} onClick={()=>setDark(!dark)} className="p-2 rounded-lg hover:bg-slate-100">{dark?<ToggleRight size={16} style={{color:B.accent}}/>:<ToggleLeft size={16} style={{color:B.t3}}/>}</button>
           </div>
         </header>
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6" style={{background:mainBg}}>
-          {!canAccessModule(currentUser, active)?<AccessDenied moduleName={active} onGoHome={()=>setActive("dashboard")}/>:<>
+          {!isOnline && <div className="mb-4 p-3 rounded-xl flex items-center gap-3" style={{background: B.redL, borderLeft: `3px solid ${B.red}`}}>
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+              <AlertTriangle size={14} style={{color: B.red}}/>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: B.red}}>🔌 Нет подключения к интернету</div>
+              <div className="text-[11px] mt-0.5" style={{color: B.t2}}>
+                Данные не обновляются. Действия будут сохранены локально и синхронизированы при восстановлении связи.
+              </div>
+            </div>
+          </div>}
+          {!canAccessModule(currentUser, active) ? <AccessDenied moduleName={active} onGoHome={()=>setActive("dashboard")}/> : <PageErrorBoundary key={active} pageName={BANK_NAV.find(n => n.id === active)?.label || active}>
           {active==="dashboard"&&<DashboardPage currentUser={currentUser} pushNav={pushNav} setToast={setToast}/>}
           {active==="pipeline"&&<PipelinePage currentUser={currentUser} setToast={setToast} favorites={favorites} toggleFavorite={toggleFavorite}/>}
           {active==="assignments"&&<AssignmentsPage currentUser={currentUser} setToast={setToast}/>}
@@ -1913,25 +2412,113 @@ function AppInner() {
           {active==="stoplist"&&<StoplistPage setToast={setToast}/>}
           {active==="scoring-admin"&&<ScoringPage setToast={setToast}/>}
           {active==="settings"&&<SettingsPage setToast={setToast}/>}
-          </>}
+          </PageErrorBoundary>}
         </div>
       </main>
 
       {/* Toast */}
-      {toast&&<Toast message={toast.msg} type={toast.type} onClose={()=>setToast(null)}/>}
+      {toast && <Toast message={toast.msg} type={toast.type} onUndo={toast.onUndo} actionLabel={toast.actionLabel} onClose={() => setToast(null)}/>}
 
       {/* Global Search Modal */}
-      {globalSearch&&<div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:9999,background:"rgba(0,0,0,0.5)",backdropFilter:"blur(4px)"}} onClick={()=>setGlobalSearch(false)}>
-        <div className="max-w-lg mx-auto mt-24" onClick={e=>e.stopPropagation()}>
+      {globalSearch && <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:9999,background:"rgba(0,0,0,0.5)",backdropFilter:"blur(4px)"}} onClick={()=>setGlobalSearch(false)}>
+        <div className="max-w-xl mx-auto mt-20" onClick={e=>e.stopPropagation()}>
           <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
             <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
-              <Search size={18} style={{color:B.t3}}/><input autoFocus value={gsQuery} onChange={e=>setGsQuery(e.target.value)} placeholder="Поиск клиентов, уступок, заявок..." className="flex-1 text-sm outline-none" style={{color:B.t1}}/>
+              <Search size={18} style={{color:B.t3}}/>
+              <input autoFocus value={gsQuery} onChange={e=>setGsQuery(e.target.value)}
+                placeholder="Поиск по ID, УНП, названию, ТТН..."
+                className="flex-1 text-sm outline-none" style={{color:B.t1}}/>
               <kbd className="px-2 py-0.5 rounded bg-slate-100 text-[10px] text-slate-400 font-mono">ESC</kbd>
             </div>
-            {gsResults.length>0&&<div className="py-2 max-h-80 overflow-y-auto">{gsResults.map((r,i)=><button key={i} onClick={()=>{setActive(r.page);setGlobalSearch(false)}} className="w-full flex items-center gap-3 px-5 py-3 hover:bg-slate-50 text-left">
-              <r.icon size={16} style={{color:B.t3}}/><div><div className="text-sm font-medium" style={{color:B.t1}}>{r.label}</div><div className="text-xs" style={{color:B.t3}}>{r.sub}</div></div>
-            </button>)}</div>}
-            {gsQuery&&gsResults.length===0&&<div className="p-8 text-center text-sm" style={{color:B.t3}}>Ничего не найдено</div>}
+            {gsQuery && <div className="py-2 max-h-[28rem] overflow-y-auto">
+              {(() => {
+                const groupLabels = {
+                  pipeline: "Заявки", assignments: "Уступки", clients: "Клиенты",
+                  deals: "Сделки", documents: "Документы",
+                };
+                const groupColors = {
+                  pipeline: B.accent, assignments: B.purple || "#7C3AED", clients: B.green,
+                  deals: "#6366F1", documents: "#0891B2",
+                };
+                const totalCount = Object.values(gsResults).reduce((s, arr) => s + arr.length, 0);
+                if (totalCount === 0) return <div className="p-8 text-center text-sm" style={{color: B.t3}}>Ничего не найдено</div>;
+
+                return Object.entries(gsResults)
+                  .filter(([_, items]) => items.length > 0)
+                  .map(([key, items]) => <div key={key} className="mb-2">
+                    <div className="px-5 py-1.5 text-[10px] font-bold uppercase tracking-wider flex items-center gap-2"
+                      style={{color: groupColors[key]}}>
+                      <span>{groupLabels[key]}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[9px]" style={{background: groupColors[key] + "15"}}>{items.length}</span>
+                    </div>
+                    {items.map((r, i) => <button key={`${key}-${i}`}
+                      onClick={() => {setActive(r.page); setGlobalSearch(false);}}
+                      className="w-full flex items-center gap-3 px-5 py-2.5 hover:bg-slate-50 text-left transition-colors">
+                      <r.icon size={15} style={{color: groupColors[key]}}/>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold truncate" style={{color: B.t1}}>{r.label}</div>
+                        <div className="text-[11px] truncate" style={{color: B.t3}}>{r.sub}</div>
+                      </div>
+                      <ChevronRight size={12} style={{color: B.t3}}/>
+                    </button>)}
+                  </div>);
+              })()}
+            </div>}
+            {!gsQuery && <div className="p-8 text-center text-[11px]" style={{color: B.t3}}>
+              Начните вводить: <strong>ID заявки</strong>, <strong>УНП</strong>, <strong>название компании</strong>, <strong>номер ТТН</strong>…
+            </div>}
+          </div>
+        </div>
+      </div>}
+
+      {/* Help / hotkeys modal */}
+      {helpModal && <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:9999,background:"rgba(0,0,0,0.5)",backdropFilter:"blur(4px)"}} onClick={()=>setHelpModal(false)}>
+        <div className="max-w-lg mx-auto mt-20" onClick={e=>e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div className="text-sm font-bold" style={{color: B.t1}}>⌨️ Горячие клавиши</div>
+              <button onClick={()=>setHelpModal(false)} className="text-[11px] hover:underline" style={{color: B.t3}}>
+                ESC для закрытия
+              </button>
+            </div>
+            <div className="p-5 text-xs">
+              <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>Общие</div>
+              <div className="space-y-2 mb-4">
+                {[
+                  {keys: ["⌘", "K"], desc: "Открыть глобальный поиск"},
+                  {keys: ["?"], desc: "Показать эту справку"},
+                  {keys: ["ESC"], desc: "Закрыть модалку"},
+                ].map((hk, i) => <div key={i} className="flex items-center justify-between">
+                  <span style={{color: B.t1}}>{hk.desc}</span>
+                  <div className="flex gap-1">
+                    {hk.keys.map((k, j) => <kbd key={j} className="px-2 py-0.5 rounded border text-[10px] font-mono"
+                      style={{background: "#F8FAFC", borderColor: B.border, color: B.t2}}>{k}</kbd>)}
+                  </div>
+                </div>)}
+              </div>
+
+              <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+                Навигация <span className="normal-case font-normal" style={{color: B.t2}}>— нажать <kbd className="px-1 rounded text-[9px]" style={{background: B.accentL, color: B.accent}}>G</kbd> затем букву</span>
+              </div>
+              <div className="space-y-2">
+                {[
+                  {keys: ["G", "D"], desc: "Дашборд"},
+                  {keys: ["G", "P"], desc: "Кредитный конвейер (Pipeline)"},
+                  {keys: ["G", "A"], desc: "Уступки (Assignments)"},
+                  {keys: ["G", "C"], desc: "Клиенты (Clients)"},
+                  {keys: ["G", "R"], desc: "Портфель (poRtfolio)"},
+                  {keys: ["G", "O"], desc: "Просрочки (Overdue)"},
+                  {keys: ["G", "S"], desc: "Стоп-лист"},
+                  {keys: ["G", "U"], desc: "Аудит-лог (aUdit)"},
+                ].map((hk, i) => <div key={i} className="flex items-center justify-between">
+                  <span style={{color: B.t1}}>{hk.desc}</span>
+                  <div className="flex gap-1">
+                    {hk.keys.map((k, j) => <kbd key={j} className="px-2 py-0.5 rounded border text-[10px] font-mono"
+                      style={{background: "#F8FAFC", borderColor: B.border, color: B.t2}}>{k}</kbd>)}
+                  </div>
+                </div>)}
+              </div>
+            </div>
           </div>
         </div>
       </div>}
@@ -1943,6 +2530,18 @@ function AppInner() {
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 8px; }
         .mono { font-family: 'JetBrains Mono', monospace; }
+        /* Accessibility: visible focus ring for keyboard users */
+        :focus-visible { outline: 2px solid ${B.accent}; outline-offset: 2px; border-radius: 4px; }
+        button:focus { outline: none; }
+        button:focus-visible { outline: 2px solid ${B.accent}; outline-offset: 2px; }
+        /* Reduced motion support (respects OS preference or persisted user pref) */
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+          }
+        }
       `}</style>
     </div>
   );
@@ -1986,12 +2585,25 @@ function DashboardPage({pushNav, setToast, currentUser}) {
     <PageHeader title="Дашборд" breadcrumbs={["Главная"]}/>
 
     <div className="grid grid-cols-2 gap-4 mb-4">
-      <KPICard label="Активный портфель" value={fmtByn(totalPortfolio)} icon={TrendingUp} color={B.accent} trend={12} tooltip="Сумма всех активных и просроченных уступок"/>
-      <KPICard label="Клиентов" value={activeClients} sub="активных на платформе" icon={Users} color={B.accent} tooltip="Количество активных компаний"/>
+      <KPICard label="Активный портфель" value={fmtByn(totalPortfolio)}
+        icon={TrendingUp} color={B.accent} trend={12}
+        periodValue={fmtByn(Math.round(totalPortfolio / 1.12))}
+        tooltip="Сумма всех активных и просроченных уступок"/>
+      <KPICard label="Клиентов" value={activeClients}
+        sub="активных на платформе" icon={Users} color={B.accent}
+        trend={3} periodValue={activeClients - 1}
+        tooltip="Количество активных компаний"/>
     </div>
     <div className="grid grid-cols-2 gap-4 mb-6">
-      <KPICard label="Просрочки" value={`${overdueDeals.length} / ${fmtByn(overdueDeals.reduce((s,d)=>s+d.amount,0))}`} icon={AlertTriangle} color={B.red} tooltip="Количество и сумма просроченных уступок"/>
-      <KPICard label="Доход банка (мес)" value={fmtByn(bankIncome)} icon={Building2} color={B.green} trend={8} tooltip="15.5% от суммы дисконтов"/>
+      <KPICard label="Просрочки"
+        value={`${overdueDeals.length} / ${fmtByn(overdueDeals.reduce((s,d)=>s+d.amount,0))}`}
+        icon={AlertTriangle} color={B.red}
+        trend={-8} trendLabel="просрочек меньше"
+        tooltip="Количество и сумма просроченных уступок"/>
+      <KPICard label="Доход банка (мес)" value={fmtByn(bankIncome)}
+        icon={Building2} color={B.green} trend={8}
+        periodValue={fmtByn(Math.round(bankIncome / 1.08))}
+        tooltip="15.5% от суммы дисконтов"/>
     </div>
 
     <div className="grid grid-cols-2 gap-6">
@@ -2205,6 +2817,21 @@ function getAssignmentSlaInfo(asg) {
 function isAssignmentBankOverdue(asg) {
   const info = getAssignmentSlaInfo(asg);
   return info.overdue && info.actor === "bank";
+}
+// isAssignmentSupplierOverdue — supplier/debtor ответственен и просрочил ответ
+function isAssignmentClientOverdue(asg) {
+  const info = getAssignmentSlaInfo(asg);
+  return info.overdue && (info.actor === "supplier" || info.actor === "debtor");
+}
+// isAssignmentDebtorPaymentOverdue — должник не оплатил в срок после получения уведомления
+function isAssignmentDebtorPaymentOverdue(asg) {
+  if (asg.stage !== "paid") return false; // only applies to paid assignments awaiting debtor repayment
+  if (!asg.dueDate) return false;
+  try {
+    const due = new Date(asg.dueDate);
+    const now = new Date();
+    return now > due && !asg.debtorRepaid;
+  } catch(e) { return false; }
 }
 function isAssignmentWaitingClient(asg) {
   const info = getAssignmentSlaInfo(asg);
@@ -2911,6 +3538,26 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
   return <div>
     <PageHeader title="Мои задачи" breadcrumbs={["Мои задачи"]}/>
 
+    {/* Overload warning — when tasks count indicates overload */}
+    {allMyTasks.length >= 15 && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow + "40"}}>
+      <div className="flex items-center gap-3">
+        <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+          <AlertTriangle size={16} style={{color: B.yellow}} className="animate-pulse"/>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-bold" style={{color: B.yellow}}>
+            ⚠ У вас {allMyTasks.length} активных задач — высокая загрузка
+          </div>
+          <div className="text-[10px] mt-0.5" style={{color: B.t2}}>
+            Приоритет: закрывать «🔥 Срочно» первым. Если не справляетесь — сообщите руководителю.
+          </div>
+        </div>
+        {isAdmin && <Btn size="sm" variant="ghost" onClick={()=>{}}>
+          Перераспределить
+        </Btn>}
+      </div>
+    </Card>}
+
     {/* View mode switcher */}
     <div className="flex items-center gap-2 mb-5">
       <button className="flex items-center gap-2 px-3 py-2 rounded-xl font-bold text-xs" style={{background:B.accent, color:"white"}}>
@@ -3406,7 +4053,24 @@ function HotkeysHelp({open, onClose}) {
 // ─── UX REDESIGN v2: Table view for pipeline (like Jira) ───
 // ─── UnifiedTasksTable: cross-module task table (pipeline + assignments + documents) ───
 function UnifiedTasksTable({tasks, onNavigate, currentUser}) {
-  const [sortBy, setSortBy] = useState({col: "sla", dir: "desc"});
+  const [sortBy, setSortBy] = usePersistedState("table-sort-unified", {col: "sla", dir: "desc"});
+
+  // Column picker — persist visible columns per user
+  const ALL_COLUMNS = [
+    {key: "type", label: "Тип", required: false, default: true},
+    {key: "id", label: "ID", required: true, default: true},
+    {key: "title", label: "Название", required: true, default: true},
+    {key: "stage", label: "Этап / Фаза", required: false, default: true},
+    {key: "sla", label: "SLA", required: false, default: true},
+    {key: "action", label: "Действие", required: false, default: true},
+  ];
+  const [visibleCols, setVisibleCols] = usePersistedState("cols-unified",
+    ALL_COLUMNS.filter(c => c.default).map(c => c.key));
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const isVisible = (key) => visibleCols.includes(key);
+  const toggleCol = (key) => {
+    setVisibleCols(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+  };
 
   const sorted = [...tasks].sort((a, b) => {
     const dir = sortBy.dir === "asc" ? 1 : -1;
@@ -3420,6 +4084,10 @@ function UnifiedTasksTable({tasks, onNavigate, currentUser}) {
       default: return 0;
     }
   });
+
+  // Pagination (25 per page)
+  const PAGE_SIZE = 25;
+  const {page, setPage, totalPages, slicedItems, total} = usePagination(sorted, PAGE_SIZE);
 
   const toggleSort = (col) => setSortBy(prev => ({
     col,
@@ -3453,22 +4121,50 @@ function UnifiedTasksTable({tasks, onNavigate, currentUser}) {
     document: "Документ",
   };
 
-  return <Card className="overflow-hidden">
+  return <Card className="overflow-hidden relative">
+    {/* Column picker button */}
+    <div className="absolute top-2 right-2 z-10">
+      <div className="relative">
+        <button onClick={() => setPickerOpen(!pickerOpen)}
+          className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold border bg-white hover:bg-slate-50"
+          style={{borderColor: B.border, color: B.t2}}>
+          <Settings size={10}/>
+          Колонки ({visibleCols.length})
+        </button>
+        {pickerOpen && <>
+          <div className="fixed inset-0 z-10" onClick={() => setPickerOpen(false)}/>
+          <div className="absolute right-0 top-7 z-20 bg-white rounded-xl shadow-lg p-2 border min-w-[200px]" style={{borderColor: B.border}}>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-1.5 px-2 pt-1" style={{color: B.t3}}>
+              Видимые колонки
+            </div>
+            {ALL_COLUMNS.map(col => <label key={col.key}
+              className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] ${col.required ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:bg-slate-50"}`}
+              style={{color: B.t1}}>
+              <input type="checkbox" checked={isVisible(col.key)} disabled={col.required}
+                onChange={() => !col.required && toggleCol(col.key)}/>
+              <span className="flex-1">{col.label}</span>
+              {col.required && <span className="text-[9px]" style={{color: B.t3}}>всегда</span>}
+            </label>)}
+          </div>
+        </>}
+      </div>
+    </div>
+
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead style={{background: "#F8FAFC"}}>
           <tr>
-            <SortableHeader col="type">Тип</SortableHeader>
-            <SortableHeader col="id">ID</SortableHeader>
-            <SortableHeader col="title">Название</SortableHeader>
-            <SortableHeader col="stage">Этап / Фаза</SortableHeader>
-            <SortableHeader col="sla" align="right">SLA</SortableHeader>
-            <SortableHeader col="action">Действие</SortableHeader>
+            {isVisible("type") && <SortableHeader col="type">Тип</SortableHeader>}
+            {isVisible("id") && <SortableHeader col="id">ID</SortableHeader>}
+            {isVisible("title") && <SortableHeader col="title">Название</SortableHeader>}
+            {isVisible("stage") && <SortableHeader col="stage">Этап / Фаза</SortableHeader>}
+            {isVisible("sla") && <SortableHeader col="sla" align="right">SLA</SortableHeader>}
+            {isVisible("action") && <SortableHeader col="action">Действие</SortableHeader>}
             <th className="px-2"></th>
           </tr>
         </thead>
         <tbody>
-          {sorted.map(t => {
+          {slicedItems.map(t => {
             const TypeIcon = typeIconMap[t.type] || FileText;
             const typeColor = typeColorMap[t.type] || B.t2;
             const typeLabel = typeLabelMap[t.type] || t.type;
@@ -3476,49 +4172,51 @@ function UnifiedTasksTable({tasks, onNavigate, currentUser}) {
               onClick={()=>onNavigate && onNavigate(t)}
               className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
               style={{borderColor: B.border, background: t.overdue ? "#FEF2F2" : "white"}}>
-              <td className="px-3 py-2">
+              {isVisible("type") && <td className="px-3 py-2">
                 <div className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold"
                   style={{background: typeColor+"15", color: typeColor}}>
                   <TypeIcon size={10}/>
                   {typeLabel}
                 </div>
-              </td>
-              <td className="px-3 py-2 mono font-semibold" style={{color: typeColor}}>{t.id}</td>
-              <td className="px-3 py-2">
+              </td>}
+              {isVisible("id") && <td className="px-3 py-2 mono font-semibold" style={{color: typeColor}}>{t.id}</td>}
+              {isVisible("title") && <td className="px-3 py-2">
                 <div className="font-semibold truncate max-w-[260px]" style={{color: B.t1}}>{t.title || "—"}</div>
-              </td>
-              <td className="px-3 py-2">
+              </td>}
+              {isVisible("stage") && <td className="px-3 py-2">
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-semibold"
                   style={{background: (t.color||B.t2)+"15", color: t.color||B.t2}}>
                   {t.subtitle || "—"}
                 </span>
-              </td>
-              <td className="px-3 py-2 text-right">
+              </td>}
+              {isVisible("sla") && <td className="px-3 py-2 text-right">
                 <span className="mono font-bold" style={{color: t.overdue ? B.red : t.days > (t.limit||1)*0.66 ? B.yellow : B.t2}}>
                   {t.days != null ? `${t.days}д` : "—"}{t.limit ? ` / ${t.limit}` : ""}
                 </span>
-              </td>
-              <td className="px-3 py-2 text-[11px]" style={{color: B.t2}}>
+              </td>}
+              {isVisible("action") && <td className="px-3 py-2 text-[11px]" style={{color: B.t2}}>
                 {t.action || "—"}
-              </td>
+              </td>}
               <td className="px-2 py-2 text-right">
                 <ChevronRight size={14} style={{color: B.t3}}/>
               </td>
             </tr>;
           })}
-          {sorted.length === 0 && <tr>
-            <td colSpan={7} className="p-10 text-center text-sm" style={{color: B.t3}}>
-              Нет задач
+          {total === 0 && <tr>
+            <td colSpan={visibleCols.length + 1}>
+              <EmptyState icon={CheckCircle} title="Все задачи закрыты"
+                subtitle="У вас нет активных задач. Новые появятся здесь автоматически когда поступят."/>
             </td>
           </tr>}
         </tbody>
       </table>
     </div>
+    <Pagination page={page} setPage={setPage} totalPages={totalPages} total={total} pageSize={PAGE_SIZE}/>
   </Card>;
 }
 
-function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFavorite, onCyclePriority, setToast}) {
-  const [sortBy, setSortBy] = useState({col: "sla", dir: "desc"});
+function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFavorite, onCyclePriority, setToast, batchMode, batchSelected = [], toggleBatch}) {
+  const [sortBy, setSortBy] = usePersistedState("table-sort-pipeline", {col: "sla", dir: "desc"});
 
   const sorted = [...items].sort((a, b) => {
     const dir = sortBy.dir === "asc" ? 1 : -1;
@@ -3540,6 +4238,10 @@ function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFa
       default: return 0;
     }
   });
+
+  // Pagination (25 per page)
+  const PAGE_SIZE = 25;
+  const {page, setPage, totalPages, slicedItems, total} = usePagination(sorted, PAGE_SIZE);
 
   const toggleSort = (col) => setSortBy(prev => ({
     col,
@@ -3595,6 +4297,19 @@ function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFa
       <table className="w-full text-xs">
         <thead className="bg-slate-50">
           <tr>
+            {batchMode && <th className="w-8 px-2 py-2">
+              <input type="checkbox"
+                checked={slicedItems.length > 0 && slicedItems.every(r => batchSelected.includes(r.id))}
+                onChange={e => {
+                  e.stopPropagation();
+                  if (e.target.checked) {
+                    slicedItems.forEach(r => { if (!batchSelected.includes(r.id)) toggleBatch && toggleBatch(r.id); });
+                  } else {
+                    slicedItems.forEach(r => { if (batchSelected.includes(r.id)) toggleBatch && toggleBatch(r.id); });
+                  }
+                }}
+                className="w-3.5 h-3.5"/>
+            </th>}
             <th className="w-8 px-2 py-2"></th>
             <SortableHeader col="id">ID</SortableHeader>
             <SortableHeader col="company">Клиент</SortableHeader>
@@ -3608,7 +4323,7 @@ function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFa
           </tr>
         </thead>
         <tbody>
-          {sorted.map(r => {
+          {slicedItems.map(r => {
             const stage = PIPELINE_STAGES.find(s => s.id === r.stage);
             const days = getDaysOnStage(r);
             const limit = getSlaLimit(r.stage, r.tier);
@@ -3620,9 +4335,16 @@ function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFa
               : (r.scoringClass==="B"||r.scoringClass==="BB") ? B.yellowL : B.redL;
 
             return <tr key={r.id}
-              onClick={()=>onSelectReq(r)}
+              onClick={(e) => {
+                if (batchMode) { e.stopPropagation(); toggleBatch && toggleBatch(r.id); return; }
+                onSelectReq(r);
+              }}
               className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
-              style={{borderColor: B.border, background: isOver ? "#FEF2F2" : "white"}}>
+              style={{borderColor: B.border, background: batchSelected.includes(r.id) ? B.accentL + "60" : isOver ? "#FEF2F2" : "white"}}>
+              {batchMode && <td className="w-8 px-2 py-2 text-center" onClick={e => e.stopPropagation()}>
+                <input type="checkbox" checked={batchSelected.includes(r.id)}
+                  onChange={() => toggleBatch && toggleBatch(r.id)} className="w-3.5 h-3.5"/>
+              </td>}
               <td className="px-2 py-2 text-center">
                 <button onClick={(e)=>{e.stopPropagation(); toggleFavorite && toggleFavorite(r.id)}}>
                   <Star size={12} fill={isFav ? B.yellow : "none"} style={{color: isFav ? B.yellow : B.t3}}/>
@@ -3670,12 +4392,16 @@ function PipelineTableView({items, currentUser, onSelectReq, favorites, toggleFa
               </td>
             </tr>;
           })}
-          {sorted.length === 0 && <tr>
-            <td colSpan={10} className="p-10 text-center text-sm" style={{color: B.t3}}>Заявки не найдены</td>
+          {total === 0 && <tr>
+            <td colSpan={10}>
+              <EmptyState icon={Inbox} title="Заявки не найдены"
+                subtitle="Попробуйте изменить фильтры или поисковый запрос"/>
+            </td>
           </tr>}
         </tbody>
       </table>
     </div>
+    <Pagination page={page} setPage={setPage} totalPages={totalPages} total={total} pageSize={PAGE_SIZE}/>
   </Card>;
 }
 
@@ -3683,6 +4409,34 @@ function AllPipelineView({currentUser, pipelineData, stageFilter, setStageFilter
   const isAdmin = currentUser.role === "admin";
   const [dateFilter, setDateFilter] = useState("all");
   const [moveConfirmModal, setMoveConfirmModal] = useState(null);
+
+  // Bulk-operations state — toggle, select, action
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelected, setBatchSelected] = useState([]);
+  const [batchActionModal, setBatchActionModal] = useState(null); // "reject" | "pass_lpr" | null
+  const [batchReason, setBatchReason] = useState("");
+  const toggleBatch = (id) => setBatchSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const clearBatch = () => { setBatchSelected([]); setBatchMode(false); };
+
+  const executeBatchAction = (action) => {
+    const count = batchSelected.length;
+    if (count === 0) return;
+    if (action === "reject") {
+      setPipelineData(prev => prev.map(p => batchSelected.includes(p.id)
+        ? {...p, stage: "rejected", rejectReason: batchReason, rejectDate: "2026-03-26", rejectedBy: currentUser.name}
+        : p));
+      setToast && setToast({msg: `${count} заявок отклонено`, type: "success"});
+    } else if (action === "pass_lpr") {
+      setPipelineData(prev => prev.map(p => batchSelected.includes(p.id) && p.stage === "analyst_verification"
+        ? {...p, stage: "lpr_decision"}
+        : p));
+      setToast && setToast({msg: `${count} заявок передано ЛПР`, type: "success"});
+    }
+    setBatchActionModal(null);
+    setBatchReason("");
+    clearBatch();
+  };
+
   const [viewLayout, setViewLayout] = useState(() => {
     // Default: table for everyone (per customer feedback — simple object-model-first approach)
     try {
@@ -3796,7 +4550,22 @@ function AllPipelineView({currentUser, pipelineData, stageFilter, setStageFilter
 
   return <div>
     <PageHeader title="Кредитный конвейер" breadcrumbs={["Кредитный конвейер"]}
-      actions={<TerminologyHelp/>}/>
+      actions={<div className="flex items-center gap-2">
+        <ExportButton filename="konveyer" setToast={setToast}
+          columns={[
+            {key: "id", label: "ID"},
+            {key: "company", label: "Клиент"},
+            {key: "unp", label: "УНП"},
+            {key: "stage", label: "Этап", formatter: r => PIPELINE_STAGES.find(s => s.id === r.stage)?.label || r.stage},
+            {key: "requestedAmount", label: "Сумма", formatter: r => r.requestedAmount || 0},
+            {key: "scoringClass", label: "Скоринг класс"},
+            {key: "scoringTotal", label: "Балл"},
+            {key: "created", label: "Создана"},
+            {key: "priority", label: "Приоритет"},
+          ]}
+          rows={filtered}/>
+        <TerminologyHelp/>
+      </div>}/>
 
     {/* View mode + Layout switcher */}
     <div className="flex items-center gap-3 mb-5 flex-wrap">
@@ -3957,6 +4726,31 @@ function AllPipelineView({currentUser, pipelineData, stageFilter, setStageFilter
       myActionOnly={myActionOnly} setMyActionOnly={setMyActionOnly}
     />
 
+    {/* Batch toolbar — only visible when batchMode on */}
+    {(isAdmin || currentUser.role === "analyst") && <div className="flex items-center justify-between mb-3 px-3 py-2 rounded-lg" style={{background: batchMode ? B.accentL : "#F8FAFC", border: `1px solid ${batchMode ? B.accent + "40" : B.border}`}}>
+      <div className="flex items-center gap-2">
+        <button onClick={() => {setBatchMode(!batchMode); if (batchMode) clearBatch();}}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold"
+          style={{background: batchMode ? B.accent : "white", color: batchMode ? "white" : B.t2, border: `1px solid ${batchMode ? B.accent : B.border}`}}>
+          {batchMode ? <XCircle size={12}/> : <CheckCircle size={12}/>}
+          {batchMode ? "Выйти из множественного режима" : "Режим выделения (bulk)"}
+        </button>
+        {batchMode && <span className="text-[11px]" style={{color: B.t2}}>
+          Выбрано: <strong style={{color: B.accent}}>{batchSelected.length}</strong> из {filtered.length}
+        </span>}
+      </div>
+      {batchMode && batchSelected.length > 0 && <div className="flex items-center gap-2">
+        <Btn size="sm" variant="ghost" onClick={() => setBatchSelected(filtered.map(f => f.id))}>Выбрать всё</Btn>
+        <Btn size="sm" variant="ghost" onClick={() => setBatchSelected([])}>Снять выделение</Btn>
+        <Btn size="sm" variant="secondary" icon={ArrowRight} onClick={() => setBatchActionModal("pass_lpr")}>
+          Передать ЛПР ({batchSelected.length})
+        </Btn>
+        <Btn size="sm" variant="danger" icon={XCircle} onClick={() => setBatchActionModal("reject")}>
+          Отклонить ({batchSelected.length})
+        </Btn>
+      </div>}
+    </div>}
+
     {/* Layout: table / flat cards / groups */}
     {viewLayout === "table" && <PipelineTableView
       items={filtered}
@@ -3966,10 +4760,61 @@ function AllPipelineView({currentUser, pipelineData, stageFilter, setStageFilter
       toggleFavorite={toggleFavorite}
       onCyclePriority={onCyclePriority}
       setToast={setToast}
+      batchMode={batchMode}
+      batchSelected={batchSelected}
+      toggleBatch={toggleBatch}
     />}
 
+    {/* Batch action confirmation modal */}
+    {batchActionModal === "reject" && <Modal open={true} onClose={() => setBatchActionModal(null)} title={`Массовое отклонение (${batchSelected.length})`}>
+      <div className="space-y-3">
+        <div className="p-3 rounded-lg flex items-start gap-2" style={{background: B.redL, borderLeft: `3px solid ${B.red}`}}>
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{color: B.red}}/>
+          <div className="text-[11px]" style={{color: B.t1}}>
+            <strong>Необратимое действие:</strong> все {batchSelected.length} заявок получат статус «Отклонено». Клиенты получат уведомления.
+          </div>
+        </div>
+        <div>
+          <label className="text-xs font-medium mb-1 block" style={{color: B.t2}}>Общая причина отклонения *</label>
+          <textarea value={batchReason} onChange={e => setBatchReason(e.target.value)} rows={2}
+            className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200"
+            placeholder="Например: дублирующие заявки, данные неактуальны..."/>
+        </div>
+        <div className="p-2 rounded text-[10px]" style={{background: "#F8FAFC", color: B.t3}}>
+          Будет отклонено <strong style={{color: B.red}}>{batchSelected.length}</strong> заявок. Причина будет добавлена в каждую.
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setBatchActionModal(null)} className="flex-1">Отмена</Btn>
+          <Btn variant="danger" onClick={() => executeBatchAction("reject")} disabled={!batchReason.trim() || batchReason.trim().length < 5} className="flex-1">
+            Отклонить {batchSelected.length} заявок
+          </Btn>
+        </div>
+      </div>
+    </Modal>}
+
+    {batchActionModal === "pass_lpr" && <Modal open={true} onClose={() => setBatchActionModal(null)} title={`Передать ${batchSelected.length} заявок ЛПР?`}>
+      <div className="space-y-3">
+        <div className="text-xs" style={{color: B.t2}}>
+          Только заявки на этапе «Верификация аналитика» будут переданы ЛПР. Прочие будут пропущены.
+        </div>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={() => setBatchActionModal(null)} className="flex-1">Отмена</Btn>
+          <Btn variant="primary" onClick={() => executeBatchAction("pass_lpr")} className="flex-1">
+            Передать ЛПР
+          </Btn>
+        </div>
+      </div>
+    </Modal>}
+
+    {viewLayout === "cards" && batchMode && <Card className="p-3 mb-3" style={{background: B.yellowL, borderColor: B.yellow + "40"}}>
+      <div className="flex items-center gap-2 text-xs" style={{color: B.t2}}>
+        <Info size={14} style={{color: B.yellow}}/>
+        <span>Массовое выделение доступно только в режиме «Таблица». Переключитесь, чтобы выбирать несколько заявок.</span>
+      </div>
+    </Card>}
+
     {viewLayout === "cards" && (filtered.length===0
-      ? <Card className="p-10 text-center text-sm" style={{color:B.t3}}>Заявки не найдены</Card>
+      ? <EmptyState icon={Inbox} title="Заявки не найдены" subtitle="Попробуйте изменить фильтры или поисковый запрос"/>
       : <div className="space-y-1.5">
           {filtered.slice().sort((a,b) => {
             const aO = isOverdue(a), bO = isOverdue(b);
@@ -3989,7 +4834,7 @@ function AllPipelineView({currentUser, pipelineData, stageFilter, setStageFilter
     )}
 
     {viewLayout === "groups" && (groups.length===0
-      ? <Card className="p-10 text-center text-sm" style={{color:B.t3}}>Заявки не найдены</Card>
+      ? <EmptyState icon={Inbox} title="Заявки не найдены" subtitle="Попробуйте изменить фильтры или поисковый запрос"/>
       : <div className="space-y-1">{groups.map(g => {
           const stageIdx = stageOrder.indexOf(g.stage.id);
           const isGreyGroup = g.stage.id === "grey_zone";
@@ -4541,6 +5386,197 @@ function ContractPreparationBlock({req, roleInfo, signerUser, returnEvent, accou
 // ─── RequestTaskForm — unified editable form shown above ActionBlock ───
 // Shows all relevant request data in a structured, editable layout
 // so the user sees everything at once and can make decisions fast.
+// ─── ScoringBlock — score display with expandable breakdown ───
+// ─── DangerConfirmModal — 2-step confirm with cool-down ───
+// Used for irreversible / financial actions (approve payment, reject request, block client)
+function DangerConfirmModal({open, onClose, onConfirm, title, description, amount, recipient, actionLabel = "Подтвердить", coolDownSec = 3, accent = "#DC2626", icon: Icon = AlertTriangle}) {
+  const [typed, setTyped] = useState("");
+  const [cooldown, setCooldown] = useState(coolDownSec);
+  const requireText = actionLabel.toUpperCase();
+
+  useEffect(() => {
+    if (!open) {
+      setTyped("");
+      setCooldown(coolDownSec);
+      return;
+    }
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(prev => prev - 1), 1000);
+    return () => clearTimeout(t);
+  }, [open, cooldown, coolDownSec]);
+
+  if (!open) return null;
+
+  const canConfirm = cooldown === 0 && typed === requireText;
+
+  return <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)"}} onClick={onClose}>
+    <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden" onClick={e => e.stopPropagation()}>
+      <div className="p-5 border-b" style={{background: accent + "10", borderColor: accent + "30"}}>
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{background: "white", border: `1px solid ${accent}40`}}>
+            <Icon size={20} style={{color: accent}}/>
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-bold uppercase tracking-wider" style={{color: accent}}>⚠ Опасное действие</div>
+            <div className="text-base font-black mt-0.5" style={{color: B.t1}}>{title}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="p-5 space-y-4">
+        {description && <div className="text-[12px]" style={{color: B.t2}}>{description}</div>}
+
+        {(amount || recipient) && <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+          {recipient && <div className="flex items-center justify-between text-[11px] mb-1">
+            <span style={{color: B.t3}}>Получатель:</span>
+            <strong style={{color: B.t1}}>{recipient}</strong>
+          </div>}
+          {amount && <div className="flex items-center justify-between">
+            <span className="text-[11px]" style={{color: B.t3}}>Сумма:</span>
+            <strong className="text-xl font-black mono" style={{color: accent}}>{typeof amount === "number" ? fmtByn(amount) : amount}</strong>
+          </div>}
+        </div>}
+
+        <div>
+          <label className="text-[11px] font-semibold block mb-1.5" style={{color: B.t2}}>
+            Введите <strong style={{color: accent}}>{requireText}</strong> чтобы подтвердить:
+          </label>
+          <input type="text" value={typed} onChange={e => setTyped(e.target.value)}
+            placeholder={requireText}
+            className="w-full px-3 py-2 text-sm rounded-lg border-2 uppercase tracking-wider"
+            style={{borderColor: typed === requireText ? accent : B.border, color: B.t1}}/>
+        </div>
+
+        <div className="flex gap-2 pt-2">
+          <Btn variant="ghost" onClick={onClose} className="flex-1">Отмена</Btn>
+          <Btn variant="danger" className="flex-1"
+            disabled={!canConfirm}
+            onClick={() => {onConfirm(); onClose();}}>
+            {cooldown > 0 ? `Подождите ${cooldown}с...` : actionLabel}
+          </Btn>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+function ScoringBlock({req, scoreColor, isExtended, openScoringDoc}) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Compute breakdown from existing fields. Values are simulated but deterministic.
+  const breakdown = [
+    {label: "Легат (судебные дела)", weight: 30, value: req.legat === "clean" ? 30 : -10, docType: "legat"},
+    {label: "БКИ (кредитная история)", weight: 50, value: req.bki === "good" ? 50 : -20, docType: "bki"},
+    {label: "Возраст компании", weight: 25, value: 20, docType: null},
+    {label: "Отрасль (сектор риска)", weight: 20, value: 15, docType: null},
+    {label: "Обороты последние 12 мес", weight: 30, value: 25, docType: null},
+    {label: "Связанные лица / аффилированность", weight: 15, value: -5, docType: null},
+  ];
+  if (isExtended) {
+    breakdown.push({label: "Чистые активы (финотчётность)", weight: 40, value: req.netAssets === "positive" ? 40 : -30, docType: "report"});
+  }
+
+  const computedTotal = breakdown.reduce((s, b) => s + b.value, 0);
+  const displayTotal = req.scoringTotal || computedTotal;
+
+  return <div className="mb-4">
+    <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+      Автоскоринг
+    </div>
+
+    {/* Header with class + total */}
+    <div className="flex items-center gap-3 p-3 rounded-xl mb-2" style={{background: scoreColor + "10"}}>
+      <div className="w-12 h-12 rounded-xl flex items-center justify-center text-lg font-black shrink-0"
+        style={{background: "white", color: scoreColor, border: `2px solid ${scoreColor}`}}>
+        {req.scoringClass || "—"}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-xs font-bold" style={{color: scoreColor}}>
+          Результат: {displayTotal} баллов из 200
+        </div>
+        <div className="text-[10px] mt-0.5" style={{color: B.t2}}>
+          {req.scoringClass === "A" || req.scoringClass === "AA" ? "Высокий балл — можно одобрять стандартно"
+            : req.scoringClass === "B" || req.scoringClass === "BB" ? "Средний балл — проверить внимательно"
+            : "Низкий балл — требуется детальная проверка"}
+        </div>
+      </div>
+      <button onClick={() => setExpanded(!expanded)}
+        className="text-[11px] font-semibold px-2.5 py-1 rounded-lg hover:bg-white/50 flex items-center gap-1 shrink-0"
+        style={{color: scoreColor}}>
+        {expanded ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}
+        Breakdown
+      </button>
+    </div>
+
+    {/* Expandable breakdown */}
+    {expanded && <div className="p-3 rounded-xl mb-2 space-y-1.5" style={{background: "#F8FAFC", border: `1px dashed ${B.border}`}}>
+      <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+        Компоненты скоринга
+      </div>
+      {breakdown.map((b, i) => {
+        const isPositive = b.value > 0;
+        const isZero = b.value === 0;
+        const color = isPositive ? B.green : isZero ? B.t3 : B.red;
+        const barWidth = Math.min(Math.abs(b.value) / Math.max(b.weight, 50) * 100, 100);
+        return <button key={i}
+          onClick={() => b.docType && openScoringDoc(b.docType)}
+          disabled={!b.docType}
+          className={`w-full flex items-center gap-3 p-2 rounded-lg text-left ${b.docType ? "hover:bg-white cursor-pointer" : "cursor-default"}`}>
+          <span className="text-[11px] flex-1 min-w-0 truncate" style={{color: B.t1}}>{b.label}</span>
+          {/* Mini bar */}
+          <div className="w-20 h-1.5 rounded-full shrink-0 relative overflow-hidden" style={{background: "#E2E8F0"}}>
+            <div className="absolute top-0 h-full rounded-full transition-all"
+              style={{background: color, width: `${barWidth}%`, left: isPositive ? "50%" : `${50 - barWidth}%`}}/>
+            <div className="absolute top-0 bottom-0 w-px" style={{background: B.t3, left: "50%"}}/>
+          </div>
+          <span className="text-xs font-bold mono w-12 text-right shrink-0" style={{color}}>
+            {isPositive ? "+" : ""}{b.value}
+          </span>
+          {b.docType && <ExternalLink size={10} style={{color: B.t3}} className="shrink-0"/>}
+        </button>;
+      })}
+      <div className="flex items-center justify-between pt-2 mt-2 border-t" style={{borderColor: B.border}}>
+        <span className="text-[11px] font-bold" style={{color: B.t1}}>Итоговый балл:</span>
+        <span className="text-sm font-black mono" style={{color: scoreColor}}>{displayTotal} / 200</span>
+      </div>
+      <div className="text-[9px] pt-1 italic" style={{color: B.t3}}>
+        Клик на компонент с внешней ссылкой открывает первоисточник данных
+      </div>
+    </div>}
+
+    {/* Quick chips (Legat/BKI/Report) for fast access */}
+    <div className="grid grid-cols-3 gap-2">
+      <button onClick={() => openScoringDoc("legat")}
+        className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
+        style={{background: req.legat === "clean" ? B.greenL + "50" : B.redL + "50"}}>
+        <span className="text-[10px] font-semibold" style={{color: B.t3}}>Легат</span>
+        <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.legat === "clean" ? B.green : B.red}}>
+          {req.legat === "clean" ? "✓ Чисто" : "✗ Записи"}
+          <ExternalLink size={10}/>
+        </span>
+      </button>
+      <button onClick={() => openScoringDoc("bki")}
+        className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
+        style={{background: req.bki === "good" ? B.greenL + "50" : B.redL + "50"}}>
+        <span className="text-[10px] font-semibold" style={{color: B.t3}}>БКИ</span>
+        <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.bki === "good" ? B.green : B.red}}>
+          {req.bki === "good" ? "✓ Хорошая" : "✗ Проблемы"}
+          <ExternalLink size={10}/>
+        </span>
+      </button>
+      {isExtended && <button onClick={() => openScoringDoc("report")}
+        className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
+        style={{background: req.netAssets === "positive" ? B.greenL + "50" : B.redL + "50"}}>
+        <span className="text-[10px] font-semibold" style={{color: B.t3}}>Отчётность</span>
+        <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.netAssets === "positive" ? B.green : B.red}}>
+          {req.netAssets === "positive" ? "✓ Чистые активы +" : "✗ Активы −"}
+          <ExternalLink size={10}/>
+        </span>
+      </button>}
+    </div>
+  </div>;
+}
+
 function RequestTaskForm({req, currentUser, onAction, setToast}) {
   const stage = PIPELINE_STAGES.find(s => s.id === req.stage);
   const roleInfo = ROLE_ACCESS[currentUser.role];
@@ -4557,6 +5593,7 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
   const [signing, setSigning] = useState(false);
   const [rejectModal, setRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+  const [rejectDangerModal, setRejectDangerModal] = useState(false);
   const [greyZoneModal, setGreyZoneModal] = useState(false);
   const [greyZoneReason, setGreyZoneReason] = useState("");
 
@@ -4865,58 +5902,8 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
         </div>}
       </div>
 
-      {/* ─── Block: Скоринг ─── */}
-      <div className="mb-4">
-        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Автоскоринг
-        </div>
-        <div className="flex items-center gap-3 p-3 rounded-xl mb-2" style={{background: scoreColor + "10"}}>
-          <div className="w-12 h-12 rounded-xl flex items-center justify-center text-lg font-black shrink-0"
-            style={{background: "white", color: scoreColor, border: `2px solid ${scoreColor}`}}>
-            {req.scoringClass || "—"}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-xs font-bold" style={{color: scoreColor}}>
-              Результат: {req.scoringTotal || "—"} баллов из 200
-            </div>
-            <div className="text-[10px] mt-0.5" style={{color: B.t2}}>
-              {req.scoringClass === "A" || req.scoringClass === "AA" ? "Высокий балл — можно одобрять стандартно"
-                : req.scoringClass === "B" || req.scoringClass === "BB" ? "Средний балл — проверить внимательно"
-                : "Низкий балл — требуется детальная проверка"}
-            </div>
-          </div>
-        </div>
-        {/* Clickable scoring details — click opens document */}
-        <div className="grid grid-cols-3 gap-2">
-          <button onClick={() => openScoringDoc("legat")}
-            className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
-            style={{background: req.legat === "clean" ? B.greenL + "50" : B.redL + "50"}}>
-            <span className="text-[10px] font-semibold" style={{color: B.t3}}>Легат</span>
-            <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.legat === "clean" ? B.green : B.red}}>
-              {req.legat === "clean" ? "✓ Чисто" : "✗ Записи"}
-              <ExternalLink size={10}/>
-            </span>
-          </button>
-          <button onClick={() => openScoringDoc("bki")}
-            className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
-            style={{background: req.bki === "good" ? B.greenL + "50" : B.redL + "50"}}>
-            <span className="text-[10px] font-semibold" style={{color: B.t3}}>БКИ</span>
-            <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.bki === "good" ? B.green : B.red}}>
-              {req.bki === "good" ? "✓ Хорошая" : "✗ Проблемы"}
-              <ExternalLink size={10}/>
-            </span>
-          </button>
-          {isExtended && <button onClick={() => openScoringDoc("report")}
-            className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-slate-50 transition-colors"
-            style={{background: req.netAssets === "positive" ? B.greenL + "50" : B.redL + "50"}}>
-            <span className="text-[10px] font-semibold" style={{color: B.t3}}>Отчётность</span>
-            <span className="text-[11px] font-bold flex items-center gap-1" style={{color: req.netAssets === "positive" ? B.green : B.red}}>
-              {req.netAssets === "positive" ? "✓ Чистые активы +" : "✗ Активы −"}
-              <ExternalLink size={10}/>
-            </span>
-          </button>}
-        </div>
-      </div>
+      {/* ─── Block: Скоринг (с раскрываемым breakdown) ─── */}
+      <ScoringBlock req={req} scoreColor={scoreColor} isExtended={isExtended} openScoringDoc={openScoringDoc}/>
 
       {/* ─── Block: Подготовка договора (только для contract_preparation) ─── */}
       {req.stage === "contract_preparation" && <div className="mb-4">
@@ -5263,11 +6250,24 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
           <textarea value={rejectReason} onChange={e => setRejectReason(e.target.value)} rows={3}
             className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200" placeholder="Например: клиент в стоп-листе, данные неактуальны..." style={{color: B.t1}}/>
         </div>
-        <Btn variant="danger" onClick={rejectSubmit} icon={XCircle} className="w-full" disabled={!rejectReason.trim()}>
-          Подтвердить отклонение
+        <Btn variant="danger" onClick={() => {setRejectModal(false); setRejectDangerModal(true);}} icon={XCircle} className="w-full" disabled={!rejectReason.trim()}>
+          Далее →
         </Btn>
       </div>
     </Modal>
+
+    {/* Reject confirmation with cool-down */}
+    <DangerConfirmModal
+      open={rejectDangerModal}
+      onClose={() => setRejectDangerModal(false)}
+      onConfirm={rejectSubmit}
+      title="Окончательно отклонить заявку?"
+      description={`Заявка ${req.id} будет отклонена с причиной: «${rejectReason.slice(0, 100)}${rejectReason.length > 100 ? "..." : ""}». Клиент получит уведомление.`}
+      actionLabel="ОТКЛОНИТЬ"
+      coolDownSec={3}
+      accent={B.red}
+      icon={XCircle}
+    />
 
     {/* Grey zone modal */}
     <Modal open={greyZoneModal} onClose={() => setGreyZoneModal(false)} title="Перенести в серую зону">
@@ -6060,17 +7060,42 @@ function PipelineDetailView({req, currentUser, pipelineData, setPipelineData, on
   const [newComment, setNewComment] = useState("");
   const canAct = canActOnStage(currentUser, req.stage);
 
+  // Soft-lock: detect if someone else is already working on this task
+  // If analystTakenBy is set and is not current user, warn them.
+  const lockedByOther = req.analystTakenBy
+    && req.analystTakenBy !== currentUser.name
+    && req.stage === "analyst_verification";
+
+  // How long ago was it taken?
+  const lockAge = (() => {
+    if (!req.analystTakenDate) return null;
+    const taken = new Date(req.analystTakenDate);
+    const diffMin = Math.floor((new Date() - taken) / 60000);
+    if (diffMin < 60) return `${diffMin} мин назад`;
+    if (diffMin < 1440) return `${Math.floor(diffMin / 60)} ч назад`;
+    return `${Math.floor(diffMin / 1440)} д назад`;
+  })();
+
   // Implicit take: when analyst (or admin) opens a new analyst_verification task,
   // automatically mark it as taken. Removes need for a separate "Взять в работу" button.
+  // BUT do not auto-override if someone else already took it — use soft-lock instead.
   useEffect(() => {
     if (!setPipelineData) return;
     if (req.stage !== "analyst_verification") return;
-    if (req.analystTakenBy) return;
+    if (req.analystTakenBy) return; // already taken (possibly by someone else — handled via lockedByOther)
     if (currentUser.role !== "analyst" && currentUser.role !== "admin") return;
     setPipelineData(prev => prev.map(p => p.id === req.id
       ? {...p, analystTakenBy: currentUser.name, analystTakenDate: "2026-03-26"}
       : p));
   }, [req.id, req.stage, req.analystTakenBy, currentUser.role, currentUser.name, setPipelineData]);
+
+  // Admin can override lock — take over from another analyst
+  const takeOverLock = () => {
+    setPipelineData(prev => prev.map(p => p.id === req.id
+      ? {...p, analystTakenBy: currentUser.name, analystTakenDate: "2026-03-26"}
+      : p));
+    setToast && setToast({msg: `Заявка ${req.id} переведена на вас`, type: "success"});
+  };
 
   const addComment = (text) => {
     if(!text?.trim()) return;
@@ -6132,6 +7157,27 @@ function PipelineDetailView({req, currentUser, pipelineData, setPipelineData, on
         {tierInfo && <span className="px-2 py-1 rounded-lg text-[10px] font-bold" style={{background:tierInfo.color+"15", color:tierInfo.color}}>{tierInfo.full}</span>}
         <StatusBadge status={req.stage} size="md"/>
       </div>}/>
+
+    {/* Soft-lock banner: someone else is working on this task */}
+    {lockedByOther && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow + "40"}}>
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
+          <Users size={16} style={{color: B.yellow}}/>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-bold" style={{color: B.yellow}}>
+            🔒 С этой заявкой уже работает другой сотрудник
+          </div>
+          <div className="text-[11px] mt-0.5" style={{color: B.t2}}>
+            <strong>{req.analystTakenBy}</strong> взял заявку в работу {lockAge ? `(${lockAge})` : ""}.
+            {currentUser.role === "admin" ? " Вы можете переназначить её на себя." : " Лучше не перебивать работу коллеги."}
+          </div>
+        </div>
+        {currentUser.role === "admin" && <Btn size="sm" variant="secondary" icon={RefreshCw} onClick={takeOverLock}>
+          Забрать себе
+        </Btn>}
+      </div>
+    </Card>}
 
     {/* TASK FORM — unified form for all stages (analyst/lpr/usko/signer/client_activation) */}
     {canAct && req.stage!=="active" && req.stage!=="rejected" && <RequestTaskForm req={req} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>}
@@ -6428,7 +7474,7 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
 }
 
 function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selectedIds, toggleSelect, setToast}) {
-  const [sortBy, setSortBy] = useState({col: "created", dir: "desc"});
+  const [sortBy, setSortBy] = usePersistedState("table-sort-assignment", {col: "created", dir: "desc"});
 
   const sorted = [...items].sort((a, b) => {
     const dir = sortBy.dir === "asc" ? 1 : -1;
@@ -6459,6 +7505,10 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
       default: return 0;
     }
   });
+
+  // Pagination (25 per page)
+  const PAGE_SIZE = 25;
+  const {page, setPage, totalPages, slicedItems, total} = usePagination(sorted, PAGE_SIZE);
 
   const toggleSort = (col) => setSortBy(prev => ({
     col,
@@ -6532,7 +7582,7 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
           </tr>
         </thead>
         <tbody>
-          {sorted.map(a => {
+          {slicedItems.map(a => {
             const supplier = COMPANIES.find(c => c.id === a.creditorId);
             const debtor = COMPANIES.find(c => c.id === a.debtorId);
             const stage = ASSIGNMENT_STAGES.find(s => s.id === a.stage);
@@ -6572,9 +7622,13 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
               </td>
               <td className="px-3 py-2 text-right">
                 {isPaid ? <span className="text-[10px]" style={{color: B.green}}>✓</span>
-                  : <span className="mono font-bold" style={{color: bankOver ? B.red : waitingClient ? B.yellow : B.t2}}>
-                    {sla.days}д{sla.limit > 0 ? ` / ${sla.limit}` : ""}
-                  </span>}
+                  : <div className="inline-flex items-center gap-1.5">
+                    <span className="mono font-bold text-[11px]" style={{color: bankOver ? B.orange : (waitingClient && sla.overdue) ? B.red : B.t2}}>
+                      {sla.days}д{sla.limit > 0 ? ` / ${sla.limit}` : ""}
+                    </span>
+                    {bankOver && <span title="Банк затянул — действие за УСКО/подписантом" className="text-[8px] font-black px-1 rounded" style={{background: B.orange + "20", color: B.orange}}>⏱ Банк</span>}
+                    {waitingClient && sla.overdue && <span title="Клиент/должник не реагирует" className="text-[8px] font-black px-1 rounded" style={{background: B.red + "20", color: B.red}}>⚠ Клиент</span>}
+                  </div>}
               </td>
               <td className="px-3 py-2 text-[10px]" style={{color: B.t3}}>{a.createdDate}</td>
               <td className="px-2 py-2 text-right">
@@ -6582,14 +7636,16 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
               </td>
             </tr>;
           })}
-          {sorted.length === 0 && <tr>
-            <td colSpan={batchMode ? 11 : 10} className="p-10 text-center text-sm" style={{color: B.t3}}>
-              Уступки не найдены
+          {total === 0 && <tr>
+            <td colSpan={batchMode ? 11 : 10}>
+              <EmptyState icon={Package} title="Уступки не найдены"
+                subtitle="Попробуйте изменить фильтры или поисковый запрос"/>
             </td>
           </tr>}
         </tbody>
       </table>
     </div>
+    <Pagination page={page} setPage={setPage} totalPages={totalPages} total={total} pageSize={PAGE_SIZE}/>
   </Card>;
 }
 
@@ -6920,6 +7976,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
   const [returnToUskoIssues, setReturnToUskoIssues] = useState([]);
   const [returnToUskoComment, setReturnToUskoComment] = useState("");
   const [paymentVerified, setPaymentVerified] = useState(false);
+  const [paymentDangerModal, setPaymentDangerModal] = useState(false);
 
   // Final / non-actionable state
   if (asg.stage === "paid") return null;
@@ -7032,9 +8089,14 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       label: signing ? "Разрешение оплаты..." : "💰 Разрешить оплату в АБС",
       icon: signing ? Loader2 : CheckCircle,
       disabled: signing || !paymentVerified,
-      onClick: () => doAdvance("paid", {paymentApprovedBy: currentUser.name, paymentApprovedDate: "2026-03-26", paidDate: "2026-03-26"}, `💰 Оплата ${fmtByn(asg.toReceive || 0)} разрешена в АБС. Средства поступят клиенту`),
+      onClick: () => setPaymentDangerModal(true),
     };
   }
+
+  // Payment confirmation (triggered from modal)
+  const executePaymentApproval = () => {
+    doAdvance("paid", {paymentApprovedBy: currentUser.name, paymentApprovedDate: "2026-03-26", paidDate: "2026-03-26"}, `💰 Оплата ${fmtByn(asg.toReceive || 0)} разрешена в АБС. Средства поступят клиенту`);
+  };
 
   return <>
     <Card className="p-5 mb-4" style={{background: (stage?.color || B.accent) + "06", borderColor: stage?.color || B.accent, borderWidth: 2}}>
@@ -7492,6 +8554,21 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
         </div>
       </div>
     </Modal>
+
+    {/* ─── Payment confirmation modal — 2-step with cool-down ─── */}
+    <DangerConfirmModal
+      open={paymentDangerModal}
+      onClose={() => setPaymentDangerModal(false)}
+      onConfirm={executePaymentApproval}
+      title="Разрешить оплату в АБС?"
+      description="После подтверждения сумма уйдёт на счёт поставщика через АБС банка. Отменить операцию нельзя."
+      amount={asg.toReceive || 0}
+      recipient={creditor?.name}
+      actionLabel="ОПЛАТИТЬ"
+      coolDownSec={3}
+      icon={CheckCircle}
+      accent={B.green}
+    />
   </>;
 }
 
@@ -8175,7 +9252,21 @@ function AssignmentsPage({currentUser, setToast}) {
   const batchAction = getBatchAction();
 
   return <div>
-    <PageHeader title="Уступки" breadcrumbs={["Уступки"]}/>
+    <PageHeader title="Уступки" breadcrumbs={["Уступки"]}
+      actions={<ExportButton filename="ustupki" setToast={setToast}
+        columns={[
+          {key: "id", label: "ID"},
+          {key: "dealId", label: "Сделка"},
+          {key: "creditorId", label: "Клиент", formatter: r => COMPANIES.find(c => c.id === r.creditorId)?.name || "—"},
+          {key: "debtorId", label: "Должник", formatter: r => COMPANIES.find(c => c.id === r.debtorId)?.name || "—"},
+          {key: "amount", label: "Сумма"},
+          {key: "toReceive", label: "К выплате"},
+          {key: "stage", label: "Этап", formatter: r => ASSIGNMENT_STAGES.find(s => s.id === r.stage)?.label || r.stage},
+          {key: "ttnNumber", label: "ТТН"},
+          {key: "shippingDate", label: "Отгрузка"},
+          {key: "createdDate", label: "Создана"},
+        ]}
+        rows={filtered}/>}/>
 
     {/* Workflow health — funnel visualization */}
     <AssignmentWorkflowHealthBanner
@@ -9051,9 +10142,32 @@ function ClientsPage({pushNav, setToast}) {
     return true;
   });
 
+  // Pagination (25 per page, separate pages per tab)
+  const PAGE_SIZE = 25;
+  const clientsPagination = usePagination(filteredClients, PAGE_SIZE);
+  const contractorsPagination = usePagination(filteredContractors, PAGE_SIZE);
+
   return <div>
     <PageHeader title={topTab === "clients" ? "Клиенты" : "Контрагенты-должники"}
-      breadcrumbs={["Клиенты", topTab === "contractors" ? "Контрагенты" : undefined].filter(Boolean)}/>
+      breadcrumbs={["Клиенты", topTab === "contractors" ? "Контрагенты" : undefined].filter(Boolean)}
+      actions={<ExportButton filename={topTab === "clients" ? "klienty" : "kontragenty"} setToast={setToast}
+        columns={topTab === "clients" ? [
+          {key: "name", label: "Название"},
+          {key: "unp", label: "УНП"},
+          {key: "scoringClass", label: "Скоринг класс"},
+          {key: "limit", label: "Лимит"},
+          {key: "used", label: "Использовано"},
+          {key: "rate", label: "Ставка %"},
+          {key: "computedStatus", label: "Статус"},
+        ] : [
+          {key: "name", label: "Название"},
+          {key: "unp", label: "УНП"},
+          {key: "scoringClass", label: "Скоринг класс"},
+          {key: "rating", label: "Рейтинг"},
+          {key: "assignmentCount", label: "Кол-во уступок"},
+          {key: "totalVolume", label: "Общая сумма"},
+        ]}
+        rows={topTab === "clients" ? filteredClients : filteredContractors}/>}/>
 
     {/* Top tab selector: Clients (creditors) vs Contractors (debtors) */}
     <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 mb-5 inline-flex">
@@ -9151,7 +10265,7 @@ function ClientsPage({pushNav, setToast}) {
           <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Ставка</th>
           <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Статус</th>
         </tr></thead>
-        <tbody>{filteredClients.map((c,i)=>{
+        <tbody>{clientsPagination.slicedItems.map((c,i)=>{
           const sc2 = c.scoring ? scoringClass(c.scoring.total) : null;
           const cfg = statusConfig[c.computedStatus];
           return <tr key={c.id} onClick={()=>setSelectedClient(c)} className={`border-b border-slate-50 cursor-pointer hover:bg-blue-50/50 transition-colors ${i%2===1?"bg-slate-50/30":""}`}>
@@ -9168,14 +10282,16 @@ function ClientsPage({pushNav, setToast}) {
               </span>
             </td>
           </tr>})}
-          {filteredClients.length === 0 && <tr>
-            <td colSpan={7} className="p-10 text-center text-sm" style={{color: B.t3}}>
-              Клиенты не найдены
+          {clientsPagination.total === 0 && <tr>
+            <td colSpan={7}>
+              <EmptyState icon={Users} title="Клиенты не найдены"
+                subtitle="Попробуйте изменить фильтр статуса или поисковый запрос"/>
             </td>
           </tr>}
         </tbody>
       </table>
       </div>
+      <Pagination {...clientsPagination} pageSize={PAGE_SIZE}/>
     </Card>
     </>}
 
@@ -9200,7 +10316,7 @@ function ClientsPage({pushNav, setToast}) {
             <th className="px-2 py-2.5 text-right font-semibold" style={{color:B.t3}}>Кол-во уступок</th>
             <th className="px-2 py-2.5 text-right font-semibold" style={{color:B.t3}}>Общая сумма</th>
           </tr></thead>
-          <tbody>{filteredContractors.map((d,i)=>{
+          <tbody>{contractorsPagination.slicedItems.map((d,i)=>{
             const sc2 = d.scoring ? scoringClass(d.scoring.total) : null;
             return <tr key={d.id} onClick={()=>setSelectedClient(d)} className={`border-b border-slate-50 cursor-pointer hover:bg-blue-50/50 transition-colors ${i%2===1?"bg-slate-50/30":""}`}>
               <td className="px-3 py-2.5 font-semibold" style={{color:B.t1}}>{d.name}</td>
@@ -9217,14 +10333,16 @@ function ClientsPage({pushNav, setToast}) {
               </td>
             </tr>;
           })}
-          {filteredContractors.length === 0 && <tr>
-            <td colSpan={6} className="p-10 text-center text-sm" style={{color: B.t3}}>
-              Контрагенты не найдены
+          {contractorsPagination.total === 0 && <tr>
+            <td colSpan={6}>
+              <EmptyState icon={Building2} title="Контрагенты не найдены"
+                subtitle="Попробуйте изменить поисковый запрос"/>
             </td>
           </tr>}
           </tbody>
         </table>
         </div>
+        <Pagination {...contractorsPagination} pageSize={PAGE_SIZE}/>
       </Card>
     </>}
   </div>;
@@ -9232,6 +10350,7 @@ function ClientsPage({pushNav, setToast}) {
 
 function ClientDetailView({client, onBack, setToast}) {
   const [limitModal, setLimitModal] = useState(false);
+  const [blockDangerModal, setBlockDangerModal] = useState(false);
   const [rateModal, setRateModal] = useState(false);
   const [newLimit, setNewLimit] = useState(client.limit||0);
   const [newRate, setNewRate] = useState(client.rate||25);
@@ -9254,12 +10373,115 @@ function ClientDetailView({client, onBack, setToast}) {
     {date:"2026-02-01", action:`Ставка изменена: ${client.rate}%`, user:"Иванов А.С."},
   ];
 
+  // PDF export — opens print-friendly window
+  const exportToPdf = () => {
+    const sc2 = client.scoring ? scoringClass(client.scoring.total) : null;
+    const statusLabels = {active: "Активный", inactive: "В процессе", rejected: "Отклонён", grey_zone: "В серой зоне", stoplist: "В стоп-листе"};
+    const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Досье: ${client.name}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; color: #111827; max-width: 900px; margin: 40px auto; padding: 0 40px; line-height: 1.5; }
+  h1 { font-size: 22px; margin-bottom: 4px; color: #1E40AF; }
+  h2 { font-size: 14px; border-bottom: 2px solid #DBEAFE; padding-bottom: 6px; margin-top: 28px; color: #1E40AF; }
+  .meta { color: #64748B; font-size: 11px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .field { border-left: 3px solid #DBEAFE; padding: 4px 10px; background: #F8FAFC; border-radius: 4px; }
+  .field-label { font-size: 9px; color: #64748B; text-transform: uppercase; font-weight: bold; letter-spacing: 0.5px; }
+  .field-value { font-size: 12px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+  th { background: #F8FAFC; text-align: left; padding: 6px 10px; font-size: 10px; color: #64748B; }
+  td { padding: 6px 10px; border-bottom: 1px solid #E2E8F0; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+  .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #E2E8F0; font-size: 10px; color: #94A3B8; text-align: center; }
+  @media print { body { margin: 0; padding: 20px; } h1 { page-break-after: avoid; } }
+</style>
+</head>
+<body>
+  <h1>Досье клиента: ${client.name}</h1>
+  <div class="meta">УНП ${client.unp} · Роль: ${client.role === "creditor" ? "Кредитор" : "Должник"} · Статус: ${statusLabels[computedStatus] || computedStatus} · Сформировано: ${new Date().toLocaleString("ru")}</div>
+
+  <h2>Основные данные</h2>
+  <div class="grid">
+    <div class="field"><div class="field-label">Название</div><div class="field-value">${client.name}</div></div>
+    <div class="field"><div class="field-label">УНП</div><div class="field-value">${client.unp}</div></div>
+    <div class="field"><div class="field-label">Роль</div><div class="field-value">${client.role === "creditor" ? "Кредитор (поставщик)" : "Должник"}</div></div>
+    <div class="field"><div class="field-label">Лимит факторинга</div><div class="field-value">${client.limit ? fmtByn(client.limit) : "—"}</div></div>
+    <div class="field"><div class="field-label">Использовано</div><div class="field-value">${client.used != null ? fmtByn(client.used) : "—"}</div></div>
+    <div class="field"><div class="field-label">Ставка</div><div class="field-value">${client.rate ? client.rate + "%" : "—"}</div></div>
+  </div>
+
+  ${sc2 ? `
+  <h2>Скоринг</h2>
+  <div class="grid">
+    <div class="field"><div class="field-label">Скоринг-класс</div><div class="field-value" style="color: ${sc2.color}">${client.scoringClass}</div></div>
+    <div class="field"><div class="field-label">Балл</div><div class="field-value">${client.scoring.total} / 200</div></div>
+    <div class="field"><div class="field-label">Риск</div><div class="field-value">${sc2.risk || "—"}</div></div>
+    <div class="field"><div class="field-label">Рекомендация</div><div class="field-value">${sc2.rec || "—"}</div></div>
+  </div>
+  ` : ""}
+
+  <h2>Сделки клиента (${clientDeals.length})</h2>
+  ${clientDeals.length > 0 ? `
+  <table>
+    <thead><tr><th>№</th><th>Сумма</th><th>Срок</th><th>Статус</th></tr></thead>
+    <tbody>
+      ${clientDeals.slice(0, 20).map(d => `<tr><td style="font-family: monospace; color: #1E40AF;">${d.id}</td><td>${fmtByn(d.amount)}</td><td>${d.term} дн.</td><td>${d.status}</td></tr>`).join("")}
+    </tbody>
+  </table>
+  ` : `<div style="color: #64748B; font-size: 11px; padding: 12px 0;">Нет сделок</div>`}
+
+  <h2>Связанные компании</h2>
+  ${relatedCompanies.length > 0 ? `
+  <table>
+    <thead><tr><th>Название</th><th>УНП</th><th>Роль</th></tr></thead>
+    <tbody>
+      ${relatedCompanies.slice(0, 20).map(c => `<tr><td>${c.name}</td><td style="font-family: monospace;">${c.unp}</td><td>${c.role === "creditor" ? "Кредитор" : "Должник"}</td></tr>`).join("")}
+    </tbody>
+  </table>
+  ` : `<div style="color: #64748B; font-size: 11px; padding: 12px 0;">Нет связей</div>`}
+
+  <h2>История</h2>
+  <table>
+    <thead><tr><th>Дата</th><th>Действие</th><th>Пользователь</th></tr></thead>
+    <tbody>
+      ${historyLog.map(h => `<tr><td>${h.date}</td><td>${h.action}</td><td>${h.user}</td></tr>`).join("")}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    Oborotka.by · Банк Oborotka (Нео Банк Азия) · Конфиденциальная информация · Документ сформирован автоматически
+  </div>
+
+  <script>
+    window.onload = function() { window.print(); };
+  </script>
+</body>
+</html>`;
+    try {
+      const w = window.open("", "_blank", "width=900,height=1200");
+      if (w) {
+        w.document.write(html);
+        w.document.close();
+        setToast && setToast({msg: "Досье открыто для печати. Используйте «Сохранить как PDF» в диалоге печати.", type: "success"});
+      } else {
+        setToast && setToast({msg: "Блокировка всплывающих окон. Разрешите popup для скачивания.", type: "warning"});
+      }
+    } catch(e) {
+      setToast && setToast({msg: "Ошибка экспорта", type: "error"});
+    }
+  };
+
   return <div>
     <PageHeader title={client.name} breadcrumbs={["Клиенты",client.name]} onBack={onBack}
       actions={<div className="flex gap-2">
+        <Btn size="sm" variant="ghost" icon={Download} onClick={exportToPdf}>Досье PDF</Btn>
         <Btn size="sm" variant="secondary" icon={CreditCard} onClick={()=>setLimitModal(true)}>Изменить лимит</Btn>
         <Btn size="sm" variant="secondary" icon={TrendingUp} onClick={()=>setRateModal(true)}>Изменить ставку</Btn>
-        <Btn size="sm" variant="danger" icon={Lock}>Заблокировать</Btn>
+        <Btn size="sm" variant="danger" icon={Lock} onClick={() => setBlockDangerModal(true)}>Заблокировать</Btn>
       </div>}/>
 
     {/* ─── STATUS BANNERS ─── */}
@@ -9312,6 +10534,10 @@ function ClientDetailView({client, onBack, setToast}) {
           </div>
           <div className="text-[10px] mt-1" style={{color: B.t2}}>
             Требует ручного рассмотрения — автоскоринг не пропустил
+          </div>
+          <div className="text-[10px] mt-1 p-2 rounded" style={{background: "white", color: B.t3}}>
+            <strong style={{color: B.t2}}>Как работает серая зона:</strong> балл {latestRequest.scoringTotal || "—"} находится в диапазоне <strong>100–140</strong> — пограничный случай.
+            Автоматически одобрять рисковано, отказывать — теряем клиента. Решение за аналитиком/ЛПР.
           </div>
         </div>
         <Btn size="sm" variant="secondary" icon={ArrowRight}
@@ -9435,6 +10661,65 @@ function ClientDetailView({client, onBack, setToast}) {
           </table>:<div className="text-xs py-4 text-center" style={{color:B.t3}}>Нет уступок</div>}
         </Card>
 
+        {/* Activity timeline — heatmap по месяцам */}
+        <Card className="p-5">
+          <h3 className="text-sm font-bold mb-1" style={{color: B.t1}}>Активность клиента</h3>
+          <div className="text-[10px] mb-3" style={{color: B.t3}}>
+            Количество уступок по месяцам — виден ритм работы с клиентом
+          </div>
+          {(() => {
+            // Build activity by month (last 12 months)
+            const months = [];
+            const now = new Date("2026-03-26");
+            for (let i = 11; i >= 0; i--) {
+              const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+              const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+              const label = d.toLocaleDateString("ru", {month: "short"});
+              months.push({key, label, count: 0, year: d.getFullYear(), month: d.getMonth() + 1});
+            }
+            // Count assignments per month for this client
+            if (typeof ASSIGNMENTS !== "undefined") {
+              ASSIGNMENTS.filter(a => a.creditorId === client.id || a.debtorId === client.id).forEach(a => {
+                if (!a.createdDate) return;
+                const m = months.find(mo => a.createdDate.startsWith(mo.key));
+                if (m) m.count++;
+              });
+            }
+            const maxCount = Math.max(1, ...months.map(m => m.count));
+            return <div>
+              <div className="flex items-end gap-1 h-20 mb-2">
+                {months.map((m, i) => {
+                  const height = (m.count / maxCount) * 100;
+                  const isCurrent = i === months.length - 1;
+                  return <div key={m.key} className="flex-1 flex flex-col items-center gap-1 group relative">
+                    <div className="w-full rounded-t relative transition-all hover:opacity-80"
+                      style={{
+                        height: `${Math.max(height, m.count > 0 ? 10 : 2)}%`,
+                        background: m.count === 0 ? "#F1F5F9" : isCurrent ? B.accent : B.accent + "70",
+                        minHeight: 2,
+                      }}>
+                      {m.count > 0 && <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[10px] font-bold" style={{color: B.t1}}>
+                        {m.count}
+                      </div>}
+                    </div>
+                  </div>;
+                })}
+              </div>
+              <div className="flex items-end gap-1">
+                {months.map(m => <div key={m.key} className="flex-1 text-[9px] text-center" style={{color: B.t3}}>
+                  {m.label}
+                </div>)}
+              </div>
+              <div className="mt-3 flex items-center justify-between text-[10px]" style={{color: B.t3}}>
+                <span>Всего за 12 мес: <strong style={{color: B.t1}}>{months.reduce((s, m) => s + m.count, 0)}</strong> уступок</span>
+                <span>Пиковый месяц: <strong style={{color: B.t1}}>
+                  {months.reduce((best, m) => m.count > best.count ? m : best, months[0]).label} ({maxCount})
+                </strong></span>
+              </div>
+            </div>;
+          })()}
+        </Card>
+
         {/* Related companies */}
         <Card className="p-5">
           <h3 className="text-sm font-bold mb-3" style={{color:B.t1}}>Связи: {client.role==="creditor"?"покупатели":"поставщики"}</h3>
@@ -9487,7 +10772,19 @@ function ClientDetailView({client, onBack, setToast}) {
       <div className="space-y-4">
         <div><label className="text-xs font-medium mb-1 block" style={{color:B.t2}}>Текущий лимит</label><div className="text-sm font-bold mono" style={{color:B.t1}}>{fmtByn(client.limit||0)}</div></div>
         <div><label className="text-xs font-medium mb-1 block" style={{color:B.t2}}>Новый лимит (BYN)</label><input type="number" value={newLimit} onChange={e=>setNewLimit(+e.target.value)} className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-100 mono" style={{color:B.t1}}/></div>
-        <Btn onClick={()=>{setLimitModal(false);setToast({msg:`Лимит ${client.name} изменён: ${fmtByn(newLimit)}`,type:"success"})}} className="w-full">Сохранить</Btn>
+        <Btn onClick={()=>{
+          const oldLimit = client.limit;
+          setLimitModal(false);
+          setToast({
+            msg: `Лимит ${client.name} изменён: ${fmtByn(oldLimit)} → ${fmtByn(newLimit)}`,
+            type: "success",
+            actionLabel: "Отменить",
+            onUndo: () => {
+              setNewLimit(oldLimit);
+              setToast && setToast({msg: "Изменение лимита отменено", type: "info"});
+            },
+          });
+        }} className="w-full">Сохранить</Btn>
       </div>
     </Modal>
 
@@ -9499,9 +10796,34 @@ function ClientDetailView({client, onBack, setToast}) {
         <select value={newRate} onChange={e=>setNewRate(+e.target.value)} className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-100" style={{color:B.t1}}>
           <option value={20.5}>20.5% (Премиум)</option><option value={25}>25% (Стандарт)</option><option value={30}>30% (Повышенный)</option>
         </select></div>
-        <Btn onClick={()=>{setRateModal(false);setToast({msg:`Ставка ${client.name} изменена: ${newRate}%`,type:"success"})}} className="w-full">Сохранить</Btn>
+        <Btn onClick={()=>{
+          const oldRate = client.rate;
+          setRateModal(false);
+          setToast({
+            msg: `Ставка ${client.name} изменена: ${oldRate}% → ${newRate}%`,
+            type: "success",
+            actionLabel: "Отменить",
+            onUndo: () => {
+              setNewRate(oldRate);
+              setToast && setToast({msg: "Изменение ставки отменено", type: "info"});
+            },
+          });
+        }} className="w-full">Сохранить</Btn>
       </div>
     </Modal>
+
+    {/* Block client confirmation */}
+    <DangerConfirmModal
+      open={blockDangerModal}
+      onClose={() => setBlockDangerModal(false)}
+      onConfirm={() => setToast && setToast({msg: `Клиент ${client.name} заблокирован`, type: "success"})}
+      title={`Заблокировать клиента «${client.name}»?`}
+      description="Клиент будет заблокирован. Новые заявки от него будут автоматически отклоняться. Действующие уступки останутся в системе."
+      actionLabel="ЗАБЛОКИРОВАТЬ"
+      coolDownSec={3}
+      accent={B.red}
+      icon={Lock}
+    />
   </div>;
 }
 
@@ -9531,17 +10853,131 @@ function PortfolioPage({pushNav, setToast}) {
   const avgTerm = Math.round(activeAll.reduce((s,d)=>s+d.term,0)/(activeAll.length||1));
   const war = activeAll.length>0?(activeAll.reduce((s,d)=>s+d.amount*(d.term<=30?20.5:d.term<=60?25:25),0)/totalPortfolio).toFixed(1):0;
 
+  // Mock period-over-period deltas (in real product — compute from historical snapshots)
+  const deltas = {
+    totalPortfolio: {value: 12.3, dir: "up"},     // +12.3% vs last month
+    avgCheck:       {value: 5.8, dir: "up"},
+    avgTerm:        {value: 2.1, dir: "down"},    // term decreased (good — faster rotation)
+    war:            {value: 0.3, dir: "up"},
+  };
+
   if(selectedDeal) return <DealDetailView deal={selectedDeal} onBack={()=>setSelectedDeal(null)} setToast={setToast}/>;
+
+  // Delta badge helper
+  const DeltaBadge = ({delta, invertColor}) => {
+    if (!delta) return null;
+    const isUp = delta.dir === "up";
+    // Green if growth is good (portfolio up, war up), red if bad (term up, for example invertColor=true)
+    const isPositive = invertColor ? !isUp : isUp;
+    const color = isPositive ? B.green : B.red;
+    return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded ml-1" style={{background: color + "15", color}}>
+      {isUp ? "↑" : "↓"} {delta.value}%
+    </span>;
+  };
 
   return <div>
     <PageHeader title="Портфель" breadcrumbs={["Портфель"]}/>
 
     <div className="grid grid-cols-2 gap-4 mb-6">
-      <KPICard label="Общий портфель" value={fmtByn(totalPortfolio)} icon={TrendingUp} color={B.accent} tooltip="Все активные + просроченные"/>
-      <KPICard label="Средний чек" value={fmtByn(avgCheck)} icon={CreditCard} color={B.purple}/>
-      <KPICard label="Средний срок" value={`${avgTerm} дн.`} icon={Clock} color={B.yellow}/>
-      <KPICard label="WAR" value={`${war}%`} icon={TrendingUp} color={B.green} tooltip="Средневзвешенная ставка"/>
+      <KPICard label={<>Общий портфель <DeltaBadge delta={deltas.totalPortfolio}/></>} value={fmtByn(totalPortfolio)} icon={TrendingUp} color={B.accent} tooltip="Все активные + просроченные · сравнение с прошлым месяцем"/>
+      <KPICard label={<>Средний чек <DeltaBadge delta={deltas.avgCheck}/></>} value={fmtByn(avgCheck)} icon={CreditCard} color={B.purple}/>
+      <KPICard label={<>Средний срок <DeltaBadge delta={deltas.avgTerm} invertColor/></>} value={`${avgTerm} дн.`} icon={Clock} color={B.yellow}/>
+      <KPICard label={<>WAR <DeltaBadge delta={deltas.war}/></>} value={`${war}%`} icon={TrendingUp} color={B.green} tooltip="Средневзвешенная ставка"/>
     </div>
+
+    {/* Portfolio forecast — next 30/60/90 days */}
+    <Card className="p-5 mb-6">
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-bold" style={{color: B.t1}}>
+            Прогноз портфеля на 30/60/90 дней
+          </h3>
+          <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+            Экстраполяция на основе текущих темпов выдачи/погашения. Серая полоса — интервал уверенности ±15%.
+          </div>
+        </div>
+        <span className="text-[9px] px-2 py-0.5 rounded" style={{background: "#EEF2FF", color: "#6366F1"}}>
+          Модель v1.0 · Линейная
+        </span>
+      </div>
+
+      {(() => {
+        // Generate forecast points (daily growth rate ~0.4% based on deltas.totalPortfolio.value / 30)
+        const dailyGrowth = deltas.totalPortfolio.value / 30 / 100; // e.g., 12.3% / 30 days / 100 = 0.0041
+        const forecastData = [];
+        for (let day = 0; day <= 90; day += 5) {
+          const base = totalPortfolio * Math.pow(1 + dailyGrowth, day);
+          const spread = base * 0.15; // ±15% confidence
+          forecastData.push({
+            day: day === 0 ? "Сейчас" : `+${day}д`,
+            forecast: Math.round(base),
+            lower: Math.round(base - spread),
+            upper: Math.round(base + spread),
+            isActual: day === 0,
+          });
+        }
+
+        // Bank limit (hardcoded mock — 15M)
+        const bankLimit = 15000000;
+        const forecast30 = forecastData.find(f => f.day === "+30д");
+        const forecast60 = forecastData.find(f => f.day === "+60д");
+        const forecast90 = forecastData.find(f => f.day === "+90д");
+
+        // Check if forecast exceeds bank limit
+        const breakPoint = forecastData.find(f => f.upper >= bankLimit);
+
+        return <div>
+          {/* Chart */}
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={forecastData} margin={{top: 10, right: 20, bottom: 0, left: 40}}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0"/>
+              <XAxis dataKey="day" tick={{fontSize: 10, fill: B.t3}}/>
+              <YAxis tick={{fontSize: 10, fill: B.t3}} tickFormatter={v => `${(v / 1000000).toFixed(1)}M`}/>
+              <Tooltip formatter={v => fmtByn(v)} labelStyle={{fontSize: 11}}/>
+              {/* Confidence interval bands - manual rendering with Area if available */}
+              <Line type="monotone" dataKey="upper" stroke="#E2E8F0" strokeWidth={1} strokeDasharray="2 2" dot={false} name="Верхний +15%"/>
+              <Line type="monotone" dataKey="lower" stroke="#E2E8F0" strokeWidth={1} strokeDasharray="2 2" dot={false} name="Нижний -15%"/>
+              <Line type="monotone" dataKey="forecast" stroke={B.accent} strokeWidth={2} dot={{fill: B.accent, r: 3}} name="Прогноз"/>
+              {/* Bank limit line */}
+              <Line type="monotone" dataKey={() => bankLimit} stroke={B.red} strokeWidth={1.5} strokeDasharray="5 5" dot={false} name="Лимит банка"/>
+            </LineChart>
+          </ResponsiveContainer>
+
+          {/* Forecast summary */}
+          <div className="grid grid-cols-3 gap-3 mt-4">
+            <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+              <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Через 30 дней</div>
+              <div className="text-base font-black mono mt-1" style={{color: B.t1}}>{fmtByn(forecast30?.forecast || 0)}</div>
+              <div className="text-[9px] mt-0.5" style={{color: B.t3}}>
+                {fmtByn(forecast30?.lower || 0)} — {fmtByn(forecast30?.upper || 0)}
+              </div>
+            </div>
+            <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+              <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Через 60 дней</div>
+              <div className="text-base font-black mono mt-1" style={{color: B.t1}}>{fmtByn(forecast60?.forecast || 0)}</div>
+              <div className="text-[9px] mt-0.5" style={{color: B.t3}}>
+                {fmtByn(forecast60?.lower || 0)} — {fmtByn(forecast60?.upper || 0)}
+              </div>
+            </div>
+            <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+              <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Через 90 дней</div>
+              <div className="text-base font-black mono mt-1" style={{color: B.t1}}>{fmtByn(forecast90?.forecast || 0)}</div>
+              <div className="text-[9px] mt-0.5" style={{color: B.t3}}>
+                {fmtByn(forecast90?.lower || 0)} — {fmtByn(forecast90?.upper || 0)}
+              </div>
+            </div>
+          </div>
+
+          {/* Limit warning */}
+          {breakPoint && <div className="mt-3 p-3 rounded-lg flex items-start gap-2" style={{background: B.yellowL, borderLeft: `3px solid ${B.yellow}`}}>
+            <AlertTriangle size={14} className="shrink-0 mt-0.5" style={{color: B.yellow}}/>
+            <div className="text-[11px]" style={{color: B.t1}}>
+              <strong>Приближение к лимиту банка ({fmtByn(bankLimit)}):</strong> при текущих темпах верхняя граница превысит лимит через <strong>{breakPoint.day}</strong>. Рассмотреть: повышение лимита, временный стоп новых уступок.
+            </div>
+          </div>}
+        </div>;
+      })()}
+    </Card>
 
     <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
       <TabFilter tabs={[{id:"all",label:"Все",badge:ALL_DEALS.length},{id:"active",label:"Активные",badge:ALL_DEALS.filter(d=>d.status==="active").length},{id:"paid",label:"Оплаченные",badge:ALL_DEALS.filter(d=>d.status==="paid").length},{id:"overdue",label:"Просроченные",badge:ALL_DEALS.filter(d=>d.status==="overdue").length}]} active={filter} onChange={setFilter}/>
@@ -9704,7 +11140,18 @@ function OverduePage({pushNav, setToast}) {
   ];
 
   return <div>
-    <PageHeader title="Просрочки" breadcrumbs={["Просрочки"]}/>
+    <PageHeader title="Просрочки" breadcrumbs={["Просрочки"]}
+      actions={<ExportButton filename="prosrochki" setToast={setToast}
+        columns={[
+          {key: "id", label: "ID"},
+          {key: "debtorId", label: "Должник", formatter: d => getDebtorName(d.debtorId)},
+          {key: "creditorId", label: "Кредитор", formatter: d => getCreditorName(d.creditorId)},
+          {key: "amount", label: "Сумма"},
+          {key: "daysLeft", label: "Дней просрочки", formatter: d => Math.abs(d.daysLeft)},
+          {key: "reservePct", label: "Резерв %", formatter: d => getReservePercent(Math.abs(d.daysLeft))},
+          {key: "reserveByn", label: "Резерв BYN", formatter: d => Math.round(d.amount * getReservePercent(Math.abs(d.daysLeft)) / 100)},
+        ]}
+        rows={overdueDeals}/>}/>
 
     {/* Reserve scale visual */}
     <Card className="p-5 mb-6">
@@ -9724,6 +11171,36 @@ function OverduePage({pushNav, setToast}) {
       <div className="text-[10px] mt-4 p-2 rounded-lg flex items-start gap-1.5" style={{background:"#EEF2FF", color:"#6366F1"}}>
         <Info size={11} className="shrink-0 mt-0.5"/>
         <span>Резервирование средств, начисление пеней и движение по корр.счёту — операции АБС банка. Oborotka.by отображает актуальные значения, полученные из АБС «Нео Банк Азия».</span>
+      </div>
+    </Card>
+
+    {/* Escalation workflow */}
+    <Card className="p-5 mb-6">
+      <h3 className="text-sm font-bold mb-1" style={{color: B.t1}}>
+        <InfoTooltip text="Автоматические действия при просрочке платежа должником">Автоматическая эскалация</InfoTooltip>
+      </h3>
+      <div className="text-[10px] mb-4" style={{color: B.t3}}>
+        Платформа автоматически выполняет эти действия по мере увеличения просрочки
+      </div>
+      <div className="grid grid-cols-4 gap-0">
+        {[
+          {day: 3, label: "Напоминание", desc: "Платформа отправляет email и SMS должнику о приближающемся сроке", color: B.yellow, icon: Bell, action: "Auto"},
+          {day: 7, label: "Претензия", desc: "Автоматическая отправка официальной претензии с расчётом пеней", color: B.orange, icon: AlertTriangle, action: "Auto"},
+          {day: 14, label: "Юр.отдел", desc: "Передача дела в юридический отдел, блокировка новых уступок от кредитора", color: B.red, icon: FileText, action: "Auto + manual review"},
+          {day: 30, label: "Взыскание", desc: "Подача иска в суд, досудебное урегулирование", color: "#991B1B", icon: Ban, action: "Manual"},
+        ].map((step, idx, arr) => <React.Fragment key={idx}>
+          <div className="flex flex-col items-center p-3 rounded-xl" style={{background: step.color + "08", border: `1px solid ${step.color}30`}}>
+            <div className="w-10 h-10 rounded-full flex items-center justify-center mb-2 shrink-0" style={{background: "white", border: `2px solid ${step.color}`}}>
+              <step.icon size={16} style={{color: step.color}}/>
+            </div>
+            <div className="text-[11px] font-bold mb-0.5" style={{color: step.color}}>День {step.day}+</div>
+            <div className="text-[11px] font-bold mb-1" style={{color: B.t1}}>{step.label}</div>
+            <div className="text-[9px] leading-tight text-center" style={{color: B.t2}}>{step.desc}</div>
+            <div className="text-[8px] mt-2 px-1.5 py-0.5 rounded-full font-bold" style={{background: step.action === "Manual" ? B.yellowL : B.accentL, color: step.action === "Manual" ? B.yellow : B.accent}}>
+              {step.action === "Auto" ? "⚙ Автоматически" : step.action === "Manual" ? "👤 Ручное" : "⚙+👤"}
+            </div>
+          </div>
+        </React.Fragment>)}
       </div>
     </Card>
 
@@ -9968,7 +11445,7 @@ function DocumentFiltersBar({
 
 // Documents table view — with sorting, CSV export, batch selection
 function DocumentTable({items, onSelect, setToast, batchMode, selectedIds, toggleSelect, onBatchAction}) {
-  const [sortBy, setSortBy] = useState({col: "created", dir: "desc"});
+  const [sortBy, setSortBy] = usePersistedState("table-sort-assignment", {col: "created", dir: "desc"});
 
   const sorted = [...items].sort((a, b) => {
     const dir = sortBy.dir === "asc" ? 1 : -1;
@@ -11540,11 +13017,59 @@ function AbsPage({setToast}) {
 function SettingsPage({setToast}) {
   const [repayOrder, setRepayOrder] = useState("gk"); // gk or proportional
   const [emailNotifs, setEmailNotifs] = useState({newDeal:true, overdue:true, payment:true, scoring:true, stoplist:true});
+  const [soundEnabled, setSoundEnabled] = usePersistedState("notifications-sound", false, v => v === true || v === false);
+  const [reducedMotion, setReducedMotion] = usePersistedState("reduced-motion", false, v => v === true || v === false);
+  const [darkMode, setDarkMode] = usePersistedState("dark-mode", false, v => v === true || v === false);
 
   return <div>
     <PageHeader title="Настройки" breadcrumbs={["Настройки"]}/>
 
     <div className="space-y-6">
+      {/* Personal UX preferences */}
+      <Card className="p-5">
+        <h3 className="text-sm font-bold mb-4" style={{color:B.t1}}>Личные настройки</h3>
+        <div className="space-y-3">
+          <label className="flex items-center justify-between p-3 rounded-lg cursor-pointer hover:bg-slate-50" style={{border: `1px solid ${B.border}`}}>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: darkMode ? "#0F172A" : "#F1F5F9"}}>
+                <span style={{color: darkMode ? "white" : B.t3, fontSize: 14}}>🌙</span>
+              </div>
+              <div>
+                <div className="text-xs font-semibold" style={{color: B.t1}}>Тёмная тема</div>
+                <div className="text-[10px]" style={{color: B.t3}}>Сохраняет зрение при длительной работе (8+ часов)</div>
+              </div>
+            </div>
+            <input type="checkbox" checked={darkMode} onChange={e => setDarkMode(e.target.checked)} className="w-4 h-4"/>
+          </label>
+
+          <label className="flex items-center justify-between p-3 rounded-lg cursor-pointer hover:bg-slate-50" style={{border: `1px solid ${B.border}`}}>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: soundEnabled ? B.accentL : "#F1F5F9"}}>
+                <Bell size={14} style={{color: soundEnabled ? B.accent : B.t3}}/>
+              </div>
+              <div>
+                <div className="text-xs font-semibold" style={{color: B.t1}}>Звук при новых задачах</div>
+                <div className="text-[10px]" style={{color: B.t3}}>Короткий сигнал когда поступает новая уступка или заявка</div>
+              </div>
+            </div>
+            <input type="checkbox" checked={soundEnabled} onChange={e => setSoundEnabled(e.target.checked)} className="w-4 h-4"/>
+          </label>
+
+          <label className="flex items-center justify-between p-3 rounded-lg cursor-pointer hover:bg-slate-50" style={{border: `1px solid ${B.border}`}}>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: "#F1F5F9"}}>
+                <Zap size={14} style={{color: B.t3}}/>
+              </div>
+              <div>
+                <div className="text-xs font-semibold" style={{color: B.t1}}>Уменьшить анимации</div>
+                <div className="text-[10px]" style={{color: B.t3}}>Отключить переходы и анимации интерфейса (доступность)</div>
+              </div>
+            </div>
+            <input type="checkbox" checked={reducedMotion} onChange={e => setReducedMotion(e.target.checked)} className="w-4 h-4"/>
+          </label>
+        </div>
+      </Card>
+
       {/* Users */}
       <Card className="p-5">
         <div className="flex items-center justify-between mb-4">
