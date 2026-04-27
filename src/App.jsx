@@ -42,6 +42,69 @@ const B = {
   border: "#E2E8F0", bg: "#F8FAFC", sidebar: "#0F172A",
 };
 
+// ─── COMPLIANCE / LEGAL CONSTANTS (РБ) ───
+// Сроки хранения документов и данных согласно НПА РБ
+const RETENTION_POLICY = {
+  contracts:           {years: 10, basis: "Банковский кодекс РБ, ст. 121"},
+  factoring_agreements: {years: 10, basis: "Банковский кодекс РБ + Указ Президента №504"},
+  pdn_consents:        {years: null, condition: "until_withdrawn_plus_3y", basis: "Закон 99-З о защите ПДн"},
+  audit_logs:          {years: 5,  basis: "99-З о ПДн, ст. 17"},
+  payment_records:     {years: 5,  basis: "Налоговый кодекс РБ"},
+  closed_assignments:  {years: 10, basis: "Банковский кодекс РБ"},
+  client_dossier:      {years: 10, basis: "Банковский кодекс РБ + Постановление НБРБ №34"},
+  kr_reports:          {years: 5,  basis: "Закон о кредитном регистре"},
+  legat_reports:       {years: 3,  basis: "Внутренний регламент Банка"},
+};
+
+// Стоп-факторы для AML/KYC (от подразделения комплаенс)
+// ВАЖНО: список черновой, требует согласования с комплаенс-подразделением Банка
+const STOP_FACTORS = [
+  {id: "terrorism", label: "Включён в перечень террористов", basis: "МВД РБ + ФАТФ", severity: "critical"},
+  {id: "pdl", label: "Бенефициар — ПДЛ/ИПДЛ", basis: "Закон 19-З", severity: "critical"},
+  {id: "self_combination", label: "Учредитель = руководитель = главбух (одно лицо)", basis: "Постановление НБРБ", severity: "high"},
+  {id: "criminal_record", label: "Уголовная ответственность учредителей/руководства", basis: "Постановление НБРБ", severity: "high"},
+  {id: "negative_reputation", label: "Связь с клиентами банка с негативной репутацией", basis: "Внутренний регламент", severity: "high"},
+  {id: "negative_state_info", label: "Негативная информация от госорганов", basis: "Внутренний регламент", severity: "high"},
+  {id: "real_estate", label: "Основной ОКЭД — купля-продажа недвижимости", basis: "Постановление НБРБ", severity: "medium"},
+  {id: "gambling", label: "Игорный бизнес", basis: "Постановление НБРБ", severity: "high"},
+  {id: "tourism", label: "Туристическая деятельность", basis: "Постановление НБРБ", severity: "medium"},
+  {id: "cash_intensive", label: "Интенсивный оборот наличных (розница, общепит)", basis: "Постановление НБРБ", severity: "medium"},
+  {id: "art_antique", label: "Реализация искусства, антиквариата, авто", basis: "Постановление НБРБ", severity: "medium"},
+  {id: "precious_metals", label: "Драгметаллы и драгкамни", basis: "Постановление НБРБ", severity: "medium"},
+  {id: "crypto", label: "Оператор криптоплатформ", basis: "Постановление НБРБ", severity: "high"},
+  {id: "crowdfunding", label: "Краудфандинг/краудлендинг/краудинвестинг", basis: "Постановление НБРБ", severity: "high"},
+  {id: "agent_payments", label: "Агент-посредник по трансграничным платежам", basis: "Постановление НБРБ", severity: "high"},
+  {id: "incomplete_data", label: "Не предоставил полные идентификационные данные", basis: "99-З + 165-З", severity: "high"},
+  {id: "fatf_blacklist", label: "Зарегистрирован в FATF чёрном списке", basis: "ФАТФ + НБРБ", severity: "critical"},
+  {id: "offshore", label: "Зарегистрирован в оффшорной зоне", basis: "Постановление СовМина", severity: "high"},
+  {id: "offshore_beneficiary", label: "Бенефициар — оффшорная компания", basis: "Постановление СовМина", severity: "high"},
+];
+
+// Условия применения упрощённой формы анкеты
+const SIMPLIFIED_FORM_CONDITIONS = [
+  {id: "rb_residents", label: "ЮЛ, бенефициары, руководитель, главбух — резиденты РБ"},
+  {id: "simple_structure", label: "Структура учредителей простая (физлица или юрлицо с указанными бенефициарами)"},
+  {id: "no_stop_factors", label: "Не выявлено стоп-факторов"},
+];
+
+// Helper: вычислить дату до какого нужно хранить документ
+function getRetentionUntil(docType, eventDate) {
+  const policy = RETENTION_POLICY[docType];
+  if (!policy) return null;
+  if (policy.years === null) return null; // условие зависит от события (отзыв согласия и т.д.)
+  try {
+    const d = new Date(eventDate);
+    d.setFullYear(d.getFullYear() + policy.years);
+    return d.toISOString().slice(0, 10);
+  } catch(e) { return null; }
+}
+
+function isInRetention(docType, eventDate) {
+  const untilStr = getRetentionUntil(docType, eventDate);
+  if (!untilStr) return true;
+  return new Date() < new Date(untilStr);
+}
+
 // ─── ROLES & ACCESS ───
 const DEFAULT_USER = {
   id: 1,
@@ -98,6 +161,48 @@ const ROLE_ACCESS = {
     assignmentStages: ["ds_signing_bank"],
     color: "#06B6D4",
     icon: "🔏",
+  },
+  credit_ops: {
+    label: "Кредитный менеджер",
+    description: "Отслеживает возврат средств от должников, эскалация просрочек",
+    modules: ["dashboard", "assignments", "overdue", "clients"],
+    stages: [],
+    assignmentStages: ["awaiting_debtor", "debtor_overdue"],
+    color: "#6366F1",
+    icon: "🔄",
+  },
+  legal: {
+    label: "Юр.отдел — взыскание",
+    description: "Работа с дефолтными уступками через суд",
+    modules: ["dashboard", "assignments", "overdue", "clients", "audit-log"],
+    stages: [],
+    assignmentStages: ["debtor_defaulted"],
+    color: "#991B1B",
+    icon: "⚖️",
+  },
+  compliance_officer: {
+    label: "Комплаенс-офицер",
+    description: "Контроль соответствия 99-З, AML/KYC, проверка стоп-факторов и санкционных списков",
+    modules: ["dashboard", "clients", "audit-log", "stoplist", "documents"],
+    stages: [],
+    assignmentStages: [],
+    canViewAllPdn: true,
+    canReviewConsents: true,
+    canViewAuditLog: true,
+    color: "#7C3AED",
+    icon: "🛡️",
+  },
+  dpo: {
+    label: "Уполномоченный по защите ПДн (DPO)",
+    description: "Обработка запросов субъектов ПДн (99-З), реакция на инциденты, ведение реестра согласий",
+    modules: ["dashboard", "clients", "audit-log"],
+    stages: [],
+    assignmentStages: [],
+    canHandleSubjectRequests: true,
+    canReviewConsents: true,
+    canViewAuditLog: true,
+    color: "#0891B2",
+    icon: "🔒",
   },
 };
 
@@ -420,7 +525,40 @@ const COMPANIES = [
   {id:1, name:"ООО «СитиБетонСтрой»", unp:"169066611", role:"creditor", status:"active",
    regDate:"2026-01-15", director:"Дерябина О.Н.", phone:"+375 29 123-45-67",
    limit:830000, used:450000, available:380000, rate:25, scoringClass:"—",
-   scoringType:"simplified", riskLevel:"low"},
+   scoringType:"simplified", riskLevel:"low",
+   // ─── COMPLIANCE SECTION ───
+   compliance: {
+     formType: "simple",
+     residencyStatus: "RB_resident",
+     onboardingMethod: "msi",
+     onboardingDate: "2026-01-15",
+     onboardingOperator: "Соколова О.А.",
+     stopFactors: {
+       checked: ["terrorism", "pdl", "fatf_blacklist", "offshore", "criminal_record", "self_combination"],
+       flagged: [],
+       lastChecked: "2026-04-15",
+     },
+     consents: {
+       pdn_processing: {signed: true, date: "2026-01-15", method: "ECP_GOSSUOK", certSerialNumber: "0xA1B2C3D4E5"},
+       kr_inquiry:     {signed: true, date: "2026-01-15", method: "ECP_GOSSUOK"},
+       legat_inquiry:  {signed: true, date: "2026-01-15", method: "ECP_GOSSUOK"},
+       marketing:      {signed: false, date: null, method: null},
+     },
+     beneficiaries: [
+       {fio: "Дерябина Ольга Николаевна", share: 100, type: "individual", isPdl: false, isResidentRB: true, passport: "MP1234567"},
+     ],
+     leadership: {
+       director: {fio: "Дерябина О.Н.", residencyRB: true, passport: "MP1234567", appointmentOrder: "Приказ №1 от 15.01.2026"},
+       chiefAccountant: {fio: "Иванова Е.С.", residencyRB: true, passport: "MP7654321", appointmentOrder: "Приказ №2 от 15.01.2026"},
+     },
+     structureType: "simple",
+     okeds: ["41.20", "43.99"],
+     mainOked: "41.20",
+   },
+   externalReports: {
+     kr: {lastReportDate: "2026-04-15", reportId: "KR-2026-001234", validUntil: "2026-05-15"},
+     legat: {lastReportDate: "2026-04-15", reportId: "LEG-2026-005678", validUntil: "2026-07-15"},
+   }},
   {id:2, name:"ООО «БелТехСнаб»", unp:"190456789", role:"debtor", status:"active",
    regDate:"2026-01-15", director:"Петров И.В.", limit:200000, used:85000,
    available:115000, rate:25, scoringClass:"A", scoringType:"full", riskLevel:"low",
@@ -631,9 +769,9 @@ const PIPELINE = [
 ];
 
 const ASSIGNMENTS = [
-  // Paid (history)
+  // ═══ Closed successfully (debtor paid — полный цикл) ═══
   {id:"ASG-001", dealId:"REQ-010", creditorId:1, debtorId:2, amount:45000, discount:2774, toReceive:42226,
-   stage:"paid", stageStartDate:"2026-03-15", createdDate:"2026-03-10", shippingDate:"2026-03-08",
+   stage:"debtor_paid", stageStartDate:"2026-03-20", createdDate:"2026-03-10", shippingDate:"2026-03-08",
    ttnNumber:"ТТН-45",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-12",
    dsNumber:"ДС-REQ-010-001", dsDate:"2026-03-12",
@@ -641,6 +779,9 @@ const ASSIGNMENTS = [
    signedByClientDate:"2026-03-13",
    paymentApprovedBy:"Петрова Н.А.", paymentApprovedDate:"2026-03-14",
    paidDate:"2026-03-15",
+   dueDate:"2026-05-14", // платёжный срок должника — 60 дней
+   debtorPaidDate:"2026-03-20", // должник оплатил досрочно
+   bankEarned:2774, // банк заработал весь дисконт
    docs:{
      dkp:{status:"signed",date:"2026-03-10"}, ttn:{status:"signed",date:"2026-03-10"},
      actReconciliation:{status:"signed",date:"2026-03-11",signedBy:"ООО «БелТехСнаб»"},
@@ -656,7 +797,73 @@ const ASSIGNMENTS = [
      {action:"ds_signed_bank",user:"Татьяна К.",userRole:"signer",date:"2026-03-12 10:00"},
      {action:"ds_signed_client",user:"ООО «СитиБетонСтрой»",userRole:"supplier",date:"2026-03-13 11:00"},
      {action:"payment_approved",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-14 14:00"},
-     {action:"paid",user:"Автоматика",userRole:"system",date:"2026-03-15 09:00",comment:"42 226 BYN"},
+     {action:"paid",user:"Автоматика",userRole:"system",date:"2026-03-15 09:00",comment:"42 226 BYN перечислено клиенту"},
+     {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2026-03-15 09:05",comment:"Ожидаем платеж от должника до 2026-05-14"},
+     {action:"debtor_paid",user:"ООО «БелТехСнаб»",userRole:"debtor",date:"2026-03-20 11:30",comment:"45 000 BYN поступили на счёт банка (досрочно за 55 дней)"},
+   ]},
+
+  // ═══ Paid to client, awaiting debtor payment (normal cycle) ═══
+  {id:"ASG-007", dealId:"REQ-010", creditorId:1, debtorId:2, amount:52000, discount:3200, toReceive:48800,
+   stage:"awaiting_debtor", stageStartDate:"2026-03-20", createdDate:"2026-03-15", shippingDate:"2026-03-13",
+   ttnNumber:"ТТН-55",
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-17",
+   dsNumber:"ДС-REQ-010-007", dsDate:"2026-03-17",
+   signedByBank:"Татьяна К.", signedByBankDate:"2026-03-17",
+   signedByClientDate:"2026-03-18",
+   paymentApprovedBy:"Петрова Н.А.", paymentApprovedDate:"2026-03-19",
+   paidDate:"2026-03-20",
+   dueDate:"2026-05-19", // 60 дней с момента выплаты
+   docs:{dkp:{status:"signed"}, ttn:{status:"signed"}, supplementaryAgreement:{status:"signed_all"}},
+   history:[
+     {action:"paid",user:"Автоматика",userRole:"system",date:"2026-03-20 09:00"},
+     {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2026-03-20 09:05",comment:"Ожидаем платёж должника до 2026-05-19"},
+   ]},
+
+  // ═══ Debtor OVERDUE — просрочка возврата (critical) ═══
+  {id:"ASG-008", dealId:"REQ-005", creditorId:3, debtorId:4, amount:38000, discount:2356, toReceive:35644,
+   stage:"debtor_overdue", stageStartDate:"2026-03-21", createdDate:"2026-01-15", shippingDate:"2026-01-10",
+   ttnNumber:"ТТН-42",
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-01-17",
+   dsNumber:"ДС-REQ-005-008", dsDate:"2026-01-17",
+   signedByBank:"Татьяна К.", signedByBankDate:"2026-01-17",
+   signedByClientDate:"2026-01-18",
+   paymentApprovedBy:"Петрова Н.А.", paymentApprovedDate:"2026-01-19",
+   paidDate:"2026-01-20",
+   dueDate:"2026-03-21", // просрочка: срок был 21.03, сейчас 26.03 — 5 дней просрочки
+   overdueDays:5,
+   remindersSent:2,
+   credit_ops_assigned:"Ковалёв И.В.",
+   docs:{dkp:{status:"signed"}, ttn:{status:"signed"}, supplementaryAgreement:{status:"signed_all"}},
+   history:[
+     {action:"paid",user:"Автоматика",userRole:"system",date:"2026-01-20 09:00"},
+     {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2026-01-20 09:05"},
+     {action:"reminder_sent",user:"Система",userRole:"system",date:"2026-03-18",comment:"Напоминание #1 за 3 дня до срока"},
+     {action:"debtor_overdue",user:"Система",userRole:"system",date:"2026-03-22",comment:"Просрочка начата автоматически"},
+     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-03-23",comment:"Повторное напоминание должнику"},
+   ]},
+
+  // ═══ Debtor DEFAULTED — передано юр.отделу (critical) ═══
+  {id:"ASG-009", dealId:"REQ-003", creditorId:5, debtorId:6, amount:120000, discount:7440, toReceive:112560,
+   stage:"debtor_defaulted", stageStartDate:"2026-02-15", createdDate:"2025-10-10", shippingDate:"2025-10-05",
+   ttnNumber:"ТТН-28",
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2025-10-12",
+   dsNumber:"ДС-REQ-003-009", dsDate:"2025-10-12",
+   paidDate:"2025-10-15",
+   dueDate:"2026-01-13", // просрочка >30 дней — дефолт
+   overdueDays:72,
+   defaultedDate:"2026-02-15",
+   legal_assigned:"Кузнецов А.П.",
+   courtCaseNumber:"Дело №А-123/2026",
+   docs:{dkp:{status:"signed"}, ttn:{status:"signed"}, supplementaryAgreement:{status:"signed_all"}},
+   history:[
+     {action:"paid",user:"Автоматика",userRole:"system",date:"2025-10-15"},
+     {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2025-10-15"},
+     {action:"debtor_overdue",user:"Система",userRole:"system",date:"2026-01-14",comment:"Просрочка начата"},
+     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-01-20",comment:"Претензия #1"},
+     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-01-27",comment:"Претензия #2"},
+     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-02-05",comment:"Финальная претензия с уведомлением о передаче в юр.отдел"},
+     {action:"debtor_defaulted",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-02-15",comment:"Передано юр.отделу для взыскания через суд"},
+     {action:"court_filed",user:"Кузнецов А.П.",userRole:"legal",date:"2026-02-20",comment:"Исковое заявление в Экономический суд Минска, дело №А-123/2026"},
    ]},
 
   // UCKO check — SLA bank
@@ -769,35 +976,116 @@ const NOTIFICATIONS = [
 const AUDIT_LOG = [
   {id:"log-1", date:"2026-03-26 14:22:14", userId:1, userName:"Смирнов Д.К.", userRole:"analyst",
    action:"verify_and_sign", objectType:"request", objectId:"REQ-006",
-   details:{amount:100000, rate:25, ecpUsed:true, ipAddress:"10.0.0.1"}},
+   severity:"info", category:"client_data",
+   ipAddress:"10.0.0.1", userAgent:"Chrome/130 Win10",
+   signedWithECP:true, certSerialNumber:"0xCERT001",
+   affectedSubject:{type:"request", id:"REQ-006", clientUnp:"190123456"},
+   dataAccessed:["amount","rate","scoring","credit_history"],
+   details:{amount:100000, rate:25}},
   {id:"log-2", date:"2026-03-26 10:15:33", userId:3, userName:"Петрова Н.А.", userRole:"usko_prepare",
    action:"contract_generated", objectType:"request", objectId:"REQ-007",
-   details:{accountNumber:"3819000012345", ipAddress:"10.0.0.2"}},
+   severity:"info", category:"document",
+   ipAddress:"10.0.0.2", userAgent:"Chrome/130 Win10",
+   signedWithECP:false,
+   affectedSubject:{type:"request", id:"REQ-007", clientUnp:"190456789"},
+   dataAccessed:["account_number","amount"],
+   details:{accountNumber:"3819000012345"}},
   {id:"log-3", date:"2026-03-26 14:30:45", userId:4, userName:"Татьяна К.", userRole:"signer",
    action:"returned_to_usko", objectType:"request", objectId:"REQ-007",
-   details:{issues:["wrong_account","wrong_amount"], comment:"Неверные реквизиты счёта", ipAddress:"10.0.0.3"}},
+   severity:"warning", category:"document",
+   ipAddress:"10.0.0.3", userAgent:"Edge/130 Win10",
+   details:{issues:["wrong_account","wrong_amount"], comment:"Неверные реквизиты счёта"}},
   {id:"log-4", date:"2026-03-25 16:00:12", userId:2, userName:"Иванов А.С.", userRole:"lpr",
    action:"approved", objectType:"request", objectId:"REQ-009",
-   details:{amount:60000, rate:25, ecpUsed:true, ipAddress:"10.0.0.4"}},
+   severity:"info", category:"client_data",
+   ipAddress:"10.0.0.4", userAgent:"Chrome/130 Win10",
+   signedWithECP:true, certSerialNumber:"0xCERT002",
+   affectedSubject:{type:"request", id:"REQ-009"},
+   dataAccessed:["scoring","credit_history","financials"],
+   details:{amount:60000, rate:25}},
   {id:"log-5", date:"2026-03-25 09:00:00", userId:5, userName:"Козлова Е.В.", userRole:"admin",
    action:"stoplist_added", objectType:"stoplist", objectId:"790123456",
-   details:{name:"ИП Козловский А.В.", reason:"Чёрная зона: отрицательная КИ", ipAddress:"10.0.0.5"}},
+   severity:"critical", category:"client_data",
+   ipAddress:"10.0.0.5", userAgent:"Chrome/130 Win10",
+   affectedSubject:{type:"client", unp:"790123456"},
+   details:{name:"ИП Козловский А.В.", reason:"Чёрная зона: отрицательная КИ"}},
   {id:"log-6", date:"2026-03-24 14:00:30", userId:3, userName:"Петрова Н.А.", userRole:"usko_prepare",
    action:"returned_to_supplier", objectType:"assignment", objectId:"ASG-005",
-   details:{issues:["ttn_illegible","dkp_missing"], comment:"ТТН нечитаемая, ДКП не приложен", ipAddress:"10.0.0.2"}},
+   severity:"warning", category:"document",
+   ipAddress:"10.0.0.2", userAgent:"Chrome/130 Win10",
+   details:{issues:["ttn_illegible","dkp_missing"], comment:"ТТН нечитаемая, ДКП не приложен"}},
   {id:"log-7", date:"2026-03-23 14:22:55", userId:1, userName:"Смирнов Д.К.", userRole:"analyst",
    action:"verified", objectType:"request", objectId:"REQ-005",
-   details:{recommendation:"approve", comment:"Скоринг ок", ipAddress:"10.0.0.1"}},
+   severity:"info", category:"client_data",
+   ipAddress:"10.0.0.1", userAgent:"Chrome/130 Win10",
+   affectedSubject:{type:"request", id:"REQ-005"},
+   dataAccessed:["scoring"],
+   details:{recommendation:"approve", comment:"Скоринг ок"}},
   {id:"log-8", date:"2026-03-22 10:00:00", userId:5, userName:"Козлова Е.В.", userRole:"admin",
    action:"scoring_model_updated", objectType:"settings", objectId:"scoring-v2",
-   details:{changed:"weights", ipAddress:"10.0.0.5"}},
+   severity:"warning", category:"settings",
+   ipAddress:"10.0.0.5", userAgent:"Chrome/130 Win10",
+   details:{changed:"weights"}},
   {id:"log-9", date:"2026-03-20 09:00:00", userId:5, userName:"Козлова Е.В.", userRole:"admin",
    action:"login", objectType:"user", objectId:"5",
-   details:{ipAddress:"10.0.0.5"}},
+   severity:"info", category:"auth",
+   ipAddress:"10.0.0.5", userAgent:"Chrome/130 Win10",
+   details:{}},
   {id:"log-10", date:"2026-03-15 09:00:00", userId:3, userName:"Петрова Н.А.", userRole:"usko_prepare",
    action:"activated", objectType:"request", objectId:"REQ-010",
-   details:{limit:500000, ipAddress:"10.0.0.2"}},
+   severity:"info", category:"client_data",
+   ipAddress:"10.0.0.2", userAgent:"Chrome/130 Win10",
+   affectedSubject:{type:"client", id:1, unp:"169066611"},
+   dataAccessed:["limit","rate","passport"],
+   details:{limit:500000}},
+  // ═══ Compliance-specific logs (NEW) ═══
+  {id:"log-11", date:"2026-04-15 10:30:00", userId:8, userName:"Соколова О.А.", userRole:"compliance_officer",
+   action:"pdn_access", objectType:"client", objectId:"1",
+   severity:"warning", category:"client_data",
+   ipAddress:"10.0.0.8", userAgent:"Chrome/131 Win11",
+   affectedSubject:{type:"client", id:1, unp:"169066611", name:"ООО «СитиБетонСтрой»"},
+   dataAccessed:["fio","passport","beneficiaries","financials"],
+   details:{purpose:"Плановая проверка комплаенс согласно п.4.2 регламента"}},
+  {id:"log-12", date:"2026-04-15 10:35:00", userId:8, userName:"Соколова О.А.", userRole:"compliance_officer",
+   action:"kr_inquiry", objectType:"client", objectId:"1",
+   severity:"info", category:"external_request",
+   ipAddress:"10.0.0.8", userAgent:"Chrome/131 Win11",
+   affectedSubject:{type:"client", id:1, unp:"169066611"},
+   details:{reportId:"KR-2026-001234", purpose:"Обновление кредитной истории"}},
+  {id:"log-13", date:"2026-03-15 09:00:00", userId:1, userName:"Дерябина О.Н. (клиент)", userRole:"supplier",
+   action:"consent_signed", objectType:"consent", objectId:"CONS-001",
+   severity:"info", category:"consent",
+   ipAddress:"217.21.45.123", userAgent:"Mobile Safari iOS",
+   signedWithECP:true, certSerialNumber:"0xA1B2C3D4E5F6",
+   affectedSubject:{type:"client", id:1, unp:"169066611"},
+   details:{consentType:"pdn_processing", method:"ECP_GOSSUOK"}},
+  {id:"log-14", date:"2026-04-20 11:15:00", userId:9, userName:"Гончарова Н.В.", userRole:"dpo",
+   action:"subject_request_received", objectType:"client", objectId:"1",
+   severity:"warning", category:"consent",
+   ipAddress:"10.0.0.9", userAgent:"Chrome/131 Win11",
+   affectedSubject:{type:"client", id:1, unp:"169066611"},
+   details:{requestType:"data_access_request", articleZ99:"ст.10 Закона 99-З"}},
 ];
+
+// ─── Audit log helpers (compliance) ───
+function getAuditLogsForSubject(subjectId, days = 365) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  return AUDIT_LOG.filter(log => {
+    if (!log.affectedSubject) return false;
+    const sid = log.affectedSubject.id || log.affectedSubject.unp;
+    if (String(sid) !== String(subjectId)) return false;
+    try { return new Date(log.date) >= cutoff; } catch(e) { return true; }
+  });
+}
+
+function getAuditLogsByCategory(category) {
+  return AUDIT_LOG.filter(log => log.category === category);
+}
+
+function getAuditLogsBySeverity(severity) {
+  return AUDIT_LOG.filter(log => log.severity === severity);
+}
 
 // Registry of all documents in the system — each doc has a unique ID + full history.
 // Documents can be referenced from multiple places (заявки, уступки) — but each has ONE detail page.
@@ -1383,12 +1671,456 @@ const BANK_USERS = [
   {id:3, name:"Петрова Н.А.", position:"Специалист УСКО (оформление)", role:"usko_prepare", email:"petrova@neobank.by", status:"active"},
   {id:4, name:"Татьяна К.", position:"Замначальника (доверенность)", role:"signer", email:"tatyana@neobank.by", status:"active"},
   {id:5, name:"Козлова Е.В.", position:"Руководитель / Комплаенс", role:"admin", email:"kozlova@neobank.by", status:"active"},
+  {id:6, name:"Ковалёв И.В.", position:"Кредитный менеджер (возврат)", role:"credit_ops", email:"kovalev@neobank.by", status:"active"},
+  {id:7, name:"Кузнецов А.П.", position:"Юрист (взыскание)", role:"legal", email:"kuznetsov@neobank.by", status:"active"},
+  {id:8, name:"Соколова О.А.", position:"Комплаенс-офицер", role:"compliance_officer", email:"sokolova@neobank.by", status:"active"},
+  {id:9, name:"Гончарова Н.В.", position:"DPO — Уполномоченная по защите ПДн", role:"dpo", email:"goncharova@neobank.by", status:"active"},
 ];
 
 // ─── UTILS ───
 const fmt = n => new Intl.NumberFormat("ru-BY").format(n);
 const fmtByn = n => `${fmt(n)} BYN`;
 const getCompany = id => COMPANIES.find(c=>c.id===id);
+
+// Compliance helpers for clients without explicit compliance section
+function getCompanyCompliance(company) {
+  if (!company) return null;
+  // If explicit compliance present — use as-is
+  if (company.compliance) return company.compliance;
+  // Synthesize defaults for legacy mock clients (so UI doesn't break)
+  return {
+    formType: company.scoringType === "simplified" ? "simple" : "extended",
+    residencyStatus: "RB_resident",
+    onboardingMethod: "msi",
+    onboardingDate: company.regDate || "2026-01-01",
+    onboardingOperator: "Соколова О.А.",
+    stopFactors: {
+      checked: ["terrorism", "pdl", "fatf_blacklist"],
+      flagged: company.status === "stoplist" ? ["criminal_record"] : [],
+      lastChecked: "2026-04-15",
+    },
+    consents: {
+      pdn_processing: {signed: true, date: company.regDate || "2026-01-01", method: "ECP_GOSSUOK"},
+      kr_inquiry:     {signed: true, date: company.regDate || "2026-01-01"},
+      legat_inquiry:  {signed: true, date: company.regDate || "2026-01-01"},
+      marketing:      {signed: false, date: null},
+    },
+    beneficiaries: [
+      {fio: company.director || "—", share: 100, type: "individual", isPdl: false, isResidentRB: true},
+    ],
+    leadership: {
+      director: {fio: company.director || "—", residencyRB: true},
+      chiefAccountant: {fio: "Иванова Е.С.", residencyRB: true},
+    },
+    structureType: "simple",
+    okeds: ["41.20"],
+    mainOked: "41.20",
+  };
+}
+
+function getCompanyExternalReports(company) {
+  if (!company) return null;
+  if (company.externalReports) return company.externalReports;
+  return {
+    kr: {lastReportDate: "2026-04-01", reportId: "KR-2026-DEFAULT", validUntil: "2026-05-01"},
+    legat: {lastReportDate: "2026-04-01", reportId: "LEG-2026-DEFAULT", validUntil: "2026-07-01"},
+  };
+}
+
+function isReportExpired(report, validityDays = 30) {
+  if (!report?.validUntil) return true;
+  return new Date() > new Date(report.validUntil);
+}
+
+// ─── Discount calculator (auto-calc for assignments) ───
+// Formula: discount = amount × rate × termDays / 365
+// rate as percent (e.g. 25 for 25%)
+function calculateDiscount({amount, rate, termDays}) {
+  if (!amount || !rate || !termDays) return 0;
+  return Math.round((amount * rate / 100) * (termDays / 365));
+}
+
+function calculateAssignmentEconomics({amount, rate, termDays}) {
+  const discount = calculateDiscount({amount, rate, termDays});
+  const toReceive = amount - discount;
+  // Bank earned dies depend on bank share of discount (typically 65.5%)
+  const bankShare = 0.655;
+  const bankIncome = Math.round(discount * bankShare);
+  return {discount, toReceive, bankIncome};
+}
+
+// Default term for assignments — 60 days (most common factoring term in BY)
+const DEFAULT_ASSIGNMENT_TERM_DAYS = 60;
+
+// ─── Payment schedule generator (для каждой транши) ───
+// Создаёт расписание платежей: сначала дисконт, потом ОД (основной долг)
+function generatePaymentSchedule(asg) {
+  if (!asg) return [];
+  const economics = calculateAssignmentEconomics({
+    amount: asg.amount,
+    rate: 25, // default
+    termDays: DEFAULT_ASSIGNMENT_TERM_DAYS,
+  });
+  const schedule = [];
+
+  if (asg.paidDate) {
+    // Дисконт начислен в момент выплаты клиенту
+    schedule.push({
+      type: "discount",
+      label: "Дисконт банка",
+      amount: asg.discount || economics.discount,
+      dueDate: asg.paidDate,
+      status: isAssignmentPaidToClient(asg) ? "paid" : "pending",
+      comment: "Удержан из суммы выплаты клиенту",
+    });
+  }
+
+  if (asg.dueDate) {
+    // ОД должен погасить должник
+    const today = new Date();
+    const due = new Date(asg.dueDate);
+    const daysUntilDue = Math.ceil((due - today) / 86400000);
+    let status = "pending";
+    if (asg.stage === "debtor_paid") status = "paid";
+    else if (asg.stage === "debtor_overdue" || asg.stage === "debtor_defaulted") status = "overdue";
+
+    schedule.push({
+      type: "principal",
+      label: "Возврат основного долга должником",
+      amount: asg.amount,
+      dueDate: asg.dueDate,
+      status,
+      daysUntilDue,
+      comment: status === "overdue" ? `Просрочка ${Math.abs(daysUntilDue)} дн.` :
+               status === "paid" ? "Получено" :
+               `До срока ${daysUntilDue} дн.`,
+    });
+  }
+
+  return schedule;
+}
+
+// ─── PDF generator: печатная форма Допсоглашения (ДС) ───
+// Открывает new window с готовой HTML-разметкой ДС, запускает window.print()
+function generateAgreementPDF(asg, creditor, debtor, setToast) {
+  const economics = asg.discount ? {discount: asg.discount, toReceive: asg.toReceive} : calculateAssignmentEconomics({amount: asg.amount, rate: 25, termDays: DEFAULT_ASSIGNMENT_TERM_DAYS});
+  const dsNumber = asg.dsNumber || `ДС-${asg.dealId}-${asg.id.replace("ASG-", "").padStart(3, "0")}`;
+  const todayStr = new Date().toLocaleDateString("ru-BY");
+
+  const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>${dsNumber}</title>
+  <style>
+    @page { size: A4; margin: 25mm 20mm; }
+    body { font-family: 'Times New Roman', serif; font-size: 12pt; color: #000; line-height: 1.5; max-width: 170mm; margin: 0 auto; padding: 20mm; }
+    h1 { font-size: 14pt; text-align: center; margin-bottom: 4pt; }
+    h2 { font-size: 11pt; text-align: center; margin-top: 0; margin-bottom: 16pt; }
+    .meta { display: flex; justify-content: space-between; margin-bottom: 16pt; font-size: 11pt; }
+    .preamble { margin-bottom: 12pt; text-align: justify; }
+    .section-title { font-weight: bold; margin-top: 16pt; margin-bottom: 8pt; }
+    table.terms { width: 100%; border-collapse: collapse; margin: 12pt 0; }
+    table.terms td { padding: 6pt 8pt; border: 1px solid #999; vertical-align: top; }
+    table.terms td:first-child { width: 45%; background: #F5F5F5; font-weight: 500; }
+    .signatures { display: flex; justify-content: space-between; margin-top: 32pt; gap: 40pt; }
+    .signature-block { flex: 1; }
+    .signature-line { border-top: 1px solid #000; margin-top: 32pt; padding-top: 4pt; font-size: 10pt; }
+    .footer { margin-top: 40pt; padding-top: 12pt; border-top: 1px solid #CCC; font-size: 9pt; color: #666; text-align: center; }
+    .stamp-area { margin-top: 32pt; height: 80pt; border: 1px dashed #CCC; padding: 8pt; font-size: 9pt; color: #999; text-align: center; }
+    @media print { .no-print { display: none; } body { padding: 0; } }
+  </style>
+</head>
+<body>
+  <h1>ДОПОЛНИТЕЛЬНОЕ СОГЛАШЕНИЕ № ${dsNumber}</h1>
+  <h2>к Генеральному договору факторинга №${asg.dealId} от ${asg.createdDate}</h2>
+
+  <div class="meta">
+    <div><strong>г. Минск</strong></div>
+    <div><strong>${todayStr}</strong></div>
+  </div>
+
+  <div class="preamble">
+    <strong>ОАО «Нео Банк Азия»</strong>, именуемый в дальнейшем «Фактор», в лице
+    Заместителя начальника управления факторинга <strong>${asg.signedByBank || "Татьяна К."}</strong>,
+    действующего на основании доверенности №12 от 01.01.2026, с одной стороны, и
+    <strong>${creditor?.name || "—"}</strong>, УНП ${creditor?.unp || "—"},
+    именуемый в дальнейшем «Кредитор», в лице директора
+    <strong>${creditor?.director || "—"}</strong>, действующего на основании Устава, с другой стороны,
+    заключили настоящее Дополнительное соглашение к Генеральному договору факторинга
+    №${asg.dealId} от ${asg.createdDate} (далее — «Договор») о нижеследующем:
+  </div>
+
+  <div class="section-title">1. ПРЕДМЕТ ДОПОЛНИТЕЛЬНОГО СОГЛАШЕНИЯ</div>
+
+  <p>1.1. Кредитор уступает Фактору денежное требование к должнику
+    <strong>${debtor?.name || "—"}</strong> (УНП ${debtor?.unp || "—"}),
+    возникшее из договора поставки, на сумму
+    <strong>${fmtByn(asg.amount || 0)}</strong>.
+  </p>
+
+  <p>1.2. Уступаемое требование подтверждается следующими документами:</p>
+  <ul>
+    <li>Договор купли-продажи (поставки)</li>
+    <li>Товарно-транспортная накладная № <strong>${asg.ttnNumber || "—"}</strong> от ${asg.shippingDate || "—"}</li>
+    <li>Электронный счёт-фактура (ЭСЧФ)</li>
+  </ul>
+
+  <div class="section-title">2. СУЩЕСТВЕННЫЕ УСЛОВИЯ</div>
+
+  <table class="terms">
+    <tr>
+      <td>Сумма уступаемого требования</td>
+      <td><strong>${fmtByn(asg.amount || 0)}</strong></td>
+    </tr>
+    <tr>
+      <td>Дисконт Фактора (вознаграждение)</td>
+      <td><strong>${fmtByn(economics.discount || 0)}</strong></td>
+    </tr>
+    <tr>
+      <td>Сумма к выплате Кредитору</td>
+      <td><strong>${fmtByn(economics.toReceive || asg.toReceive || 0)}</strong></td>
+    </tr>
+    <tr>
+      <td>Срок отсрочки платежа должником</td>
+      <td><strong>${DEFAULT_ASSIGNMENT_TERM_DAYS} календарных дней</strong></td>
+    </tr>
+    <tr>
+      <td>Дата ожидаемого погашения должником</td>
+      <td><strong>${asg.dueDate || "—"}</strong></td>
+    </tr>
+    <tr>
+      <td>Тип факторинга</td>
+      <td>Открытый, с уведомлением должника</td>
+    </tr>
+  </table>
+
+  <div class="section-title">3. ПОРЯДОК ВЫПЛАТЫ</div>
+
+  <p>3.1. Сумма ${fmtByn(economics.toReceive || asg.toReceive || 0)}
+    перечисляется на расчётный счёт Кредитора в течение 1 (одного) рабочего дня
+    с момента подписания настоящего Дополнительного соглашения обеими сторонами.</p>
+
+  <p>3.2. Должник перечисляет полную сумму уступаемого требования
+    (${fmtByn(asg.amount || 0)}) на расчётный счёт Фактора в срок до
+    <strong>${asg.dueDate || "—"}</strong>.</p>
+
+  <div class="section-title">4. ОТВЕТСТВЕННОСТЬ СТОРОН</div>
+
+  <p>4.1. За нарушение сроков погашения должник уплачивает Фактору пеню
+    в размере 0,1% от суммы просроченного платежа за каждый день просрочки.</p>
+
+  <p>4.2. Кредитор несёт ответственность за действительность уступаемого требования
+    в соответствии с Гражданским кодексом Республики Беларусь.</p>
+
+  <div class="section-title">5. ПОДПИСИ СТОРОН</div>
+
+  <div class="signatures">
+    <div class="signature-block">
+      <div><strong>ФАКТОР</strong></div>
+      <div>ОАО «Нео Банк Азия»</div>
+      <div>УНП: 100000000</div>
+      <div class="signature-line">${asg.signedByBank || "________________"}</div>
+      <div>Подписано ЭЦП ${asg.signedByBankDate || "_____________"}</div>
+      <div class="stamp-area">М.П.</div>
+    </div>
+    <div class="signature-block">
+      <div><strong>КРЕДИТОР</strong></div>
+      <div>${creditor?.name || "—"}</div>
+      <div>УНП: ${creditor?.unp || "—"}</div>
+      <div class="signature-line">${creditor?.director || "________________"}</div>
+      <div>Подписано ЭЦП ${asg.signedByClientDate || "_____________"}</div>
+      <div class="stamp-area">М.П.</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Документ сформирован автоматически платформой Oborotka.by · ${todayStr} · Конфиденциально<br/>
+    Срок хранения: 10 лет (Банковский кодекс РБ, ст. 121)
+  </div>
+
+  <script>
+    window.onload = function() {
+      setTimeout(function() { window.print(); }, 500);
+    };
+  </script>
+</body>
+</html>`;
+
+  try {
+    const w = window.open("", "_blank", "width=900,height=1200");
+    if (w) {
+      w.document.write(html);
+      w.document.close();
+      setToast && setToast({msg: `${dsNumber} открыто для печати`, type: "success"});
+    } else {
+      setToast && setToast({msg: "Блокировка popup. Разрешите всплывающие окна.", type: "warning"});
+    }
+  } catch(e) {
+    setToast && setToast({msg: "Ошибка генерации PDF", type: "error"});
+  }
+}
+
+// ─── CONSENTS REGISTRY (99-З о защите ПДн) ───
+// Все согласия клиентов на обработку ПДн. First-class сущность по 99-З.
+const CONSENTS_REGISTRY = [
+  {id: "CONS-001", clientId: 1, type: "pdn_processing",
+   title: "Согласие на обработку персональных данных",
+   status: "active", signed: true, signedDate: "2026-01-15", signedTime: "10:30",
+   signedMethod: "ECP_GOSSUOK", certSerialNumber: "0xA1B2C3D4E5F6",
+   purpose: "Заключение и исполнение договора факторинга, оценка кредитоспособности (скоринг), передача в Кредитный регистр и Легат, соблюдение AML/KYC требований",
+   retentionPeriod: "до отзыва согласия + 3 года",
+   canWithdraw: true, withdrawnDate: null,
+   text: "Я, [ФИО], даю согласие на обработку моих персональных данных согласно Закону 99-З...",
+   legalBasis: "Закон №99-З от 7.05.2021"},
+  {id: "CONS-002", clientId: 1, type: "kr_inquiry",
+   title: "Согласие на запрос отчёта в Кредитный регистр НБРБ",
+   status: "active", signed: true, signedDate: "2026-01-15", signedTime: "10:32",
+   signedMethod: "ECP_GOSSUOK",
+   purpose: "Получение кредитной истории клиента из Кредитного регистра НБРБ для оценки платёжеспособности",
+   retentionPeriod: "5 лет с момента последнего запроса",
+   canWithdraw: true, withdrawnDate: null,
+   legalBasis: "Закон о Кредитном регистре"},
+  {id: "CONS-003", clientId: 1, type: "legat_inquiry",
+   title: "Согласие на проверку в Легате (реестр судебных дел)",
+   status: "active", signed: true, signedDate: "2026-01-15", signedTime: "10:33",
+   signedMethod: "ECP_GOSSUOK",
+   purpose: "Получение информации о судебных делах клиента из системы Легат для оценки рисков",
+   retentionPeriod: "3 года",
+   canWithdraw: true, withdrawnDate: null,
+   legalBasis: "Регламент НЦЭУ"},
+  {id: "CONS-004", clientId: 1, type: "marketing",
+   title: "Согласие на маркетинговые рассылки",
+   status: "not_signed", signed: false, signedDate: null,
+   purpose: "Рассылка информации о новых продуктах и услугах",
+   retentionPeriod: "до отзыва",
+   canWithdraw: true, withdrawnDate: null,
+   legalBasis: "Закон 99-З"},
+  // Examples for other clients
+  {id: "CONS-005", clientId: 2, type: "pdn_processing",
+   status: "active", signed: true, signedDate: "2026-01-15", signedMethod: "ECP_GOSSUOK"},
+  {id: "CONS-006", clientId: 2, type: "kr_inquiry",
+   status: "active", signed: true, signedDate: "2026-01-15", signedMethod: "ECP_GOSSUOK"},
+];
+
+function getClientConsents(clientId) {
+  return CONSENTS_REGISTRY.filter(c => c.clientId === clientId);
+}
+
+function hasActiveConsent(clientId, type) {
+  return CONSENTS_REGISTRY.some(c => c.clientId === clientId && c.type === type && c.signed && c.status === "active" && !c.withdrawnDate);
+}
+
+// ─── Credit Registry (Кредитный регистр НБРБ) — mock data ───
+const KR_REPORTS = {
+  // unp → report
+  "169066611": {
+    request: {unp: "169066611", requestDate: "2026-04-15", requestId: "KR-2026-001234", requestedBy: "Соколова О.А."},
+    creditHistory: [
+      {creditor: "Беларусбанк", type: "Кредит на пополнение оборотных средств", amount: 50000, currency: "BYN",
+       term: "12 мес", openDate: "2024-05-15", closeDate: "2025-05-15",
+       status: "closed_on_time", maxOverdueDays: 0},
+      {creditor: "БПС-Сбербанк", type: "Овердрафт", amount: 30000, currency: "BYN",
+       term: "До востребования", openDate: "2025-09-01", closeDate: null,
+       status: "active", currentBalance: 12500, maxOverdueDays: 0},
+      {creditor: "Приорбанк", type: "Целевой кредит", amount: 80000, currency: "BYN",
+       term: "24 мес", openDate: "2023-01-15", closeDate: "2025-01-15",
+       status: "closed_on_time", maxOverdueDays: 3},
+    ],
+    summary: {totalActive: 1, totalClosed: 2, overdueRecords: 0, maxOverdueDays: 3, scoringComponent: 50},
+    validUntil: "2026-05-15",
+  },
+  "190456789": {
+    request: {unp: "190456789", requestDate: "2026-04-10", requestId: "KR-2026-001100"},
+    creditHistory: [
+      {creditor: "Беларусбанк", type: "Кредитная линия", amount: 200000, currency: "BYN",
+       openDate: "2024-03-01", status: "active", currentBalance: 85000, maxOverdueDays: 0},
+    ],
+    summary: {totalActive: 1, totalClosed: 0, overdueRecords: 0, maxOverdueDays: 0, scoringComponent: 50},
+    validUntil: "2026-05-10",
+  },
+};
+
+function fetchCreditRegistryReport(unp) {
+  return KR_REPORTS[unp] || null;
+}
+
+// ─── Legat (Реестр судебных дел Минюста) — mock data ───
+const LEGAT_REPORTS = {
+  "169066611": {
+    request: {unp: "169066611", requestDate: "2026-04-15", requestId: "LEG-2026-005678", requestedBy: "Соколова О.А."},
+    courtCases: [
+      {caseId: "А-456/2024", court: "Экономический суд г. Минска", dateFiled: "2024-03-15",
+       plaintiff: "ООО «Контрагент-Б»", defendant: "ООО «СитиБетонСтрой»",
+       subject: "Взыскание задолженности по договору поставки", amount: 12000,
+       status: "closed", outcome: "settled", closeDate: "2024-06-20"},
+    ],
+    summary: {totalCases: 1, asDefendant: 1, asPlaintiff: 0, openCases: 0, totalAmountAsDefendant: 12000},
+    validUntil: "2026-07-15",
+  },
+  "190456789": {
+    request: {unp: "190456789", requestDate: "2026-04-10", requestId: "LEG-2026-005500"},
+    courtCases: [],
+    summary: {totalCases: 0, asDefendant: 0, asPlaintiff: 0, openCases: 0, totalAmountAsDefendant: 0},
+    validUntil: "2026-07-10",
+  },
+};
+
+function fetchLegatReport(unp) {
+  return LEGAT_REPORTS[unp] || null;
+}
+// Returns compliance data for any document: retention, signing details, storage
+function getDocumentCompliance(doc) {
+  if (!doc) return null;
+  if (doc.compliance) return doc.compliance;
+  // Synthesize defaults based on docType
+  const docTypeMapping = {
+    generalContract:        "factoring_agreements",
+    supplementaryAgreement: "factoring_agreements",
+    decision:               "factoring_agreements",
+    consent:                "pdn_consents",
+    krReport:               "kr_reports",
+    legatReport:            "legat_reports",
+    paymentOrder:           "payment_records",
+    auditEvent:             "audit_logs",
+  };
+  const retentionType = docTypeMapping[doc.docType] || "client_dossier";
+  const retentionUntil = doc.validity?.issueDate
+    ? getRetentionUntil(retentionType, doc.validity.issueDate)
+    : null;
+  return {
+    retentionPolicy: {
+      type: retentionType,
+      period: RETENTION_POLICY[retentionType]?.years
+        ? `${RETENTION_POLICY[retentionType].years} лет`
+        : "до отзыва согласия",
+      basis: RETENTION_POLICY[retentionType]?.basis || "Внутренний регламент",
+      retentionUntil,
+      archiveAfter: retentionUntil ? null : null,
+    },
+    signing: {
+      method: doc.signatureChain?.some(s => s.method?.includes("ЭЦП")) ? "ECP_GOSSUOK" : "manual",
+      cryptoProvider: "Авест (Avest)",
+      standard: "СТБ 34.101.45 / 34.101.66",
+      signatures: (doc.signatureChain || []).filter(s => s.status === "signed").map(s => ({
+        signer: s.signedBy,
+        role: s.party,
+        date: s.signedAt,
+        certSerialNumber: "0xMOCK_CERT",
+      })),
+      timeStamp: doc.signatureChain?.find(s => s.status === "signed")?.signedAt || null,
+    },
+    storage: {
+      location: "BeCloud (РБ)",
+      encryption: "AES-256-GCM",
+      backupCount: 3,
+      worm: true, // Write Once Read Many
+    },
+    legalBasis: doc.docType === "consent"
+      ? "Закон 99-З о защите ПДн"
+      : "СТБ 34.101.45 + Банковский кодекс РБ",
+  };
+}
 const getCreditorName = id => getCompany(id)?.name || "—";
 const getDebtorName = id => getCompany(id)?.name || "—";
 
@@ -2565,6 +3297,16 @@ function DashboardPage({pushNav, setToast, currentUser}) {
   const waitingUrgent = waitingAsgs.filter(a => getClientWaitLevel(a)==="urgent");
   const waitingWarning = waitingAsgs.filter(a => getClientWaitLevel(a)==="warning");
 
+  // ─── Recover phase metrics — deals where we paid client, awaiting debtor ───
+  const awaitingDebtorAsgs = ASSIGNMENTS.filter(a => a.stage === "awaiting_debtor");
+  const awaitingDebtorAmount = awaitingDebtorAsgs.reduce((s, a) => s + (a.amount || 0), 0);
+  const debtorOverdueAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_overdue");
+  const debtorOverdueAmount = debtorOverdueAsgs.reduce((s, a) => s + (a.amount || 0), 0);
+  const debtorDefaultedAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_defaulted");
+  const debtorDefaultedAmount = debtorDefaultedAsgs.reduce((s, a) => s + (a.amount || 0), 0);
+  const closedSuccessAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_paid");
+  const totalEarnedFromClosed = closedSuccessAsgs.reduce((s, a) => s + (a.bankEarned || 0), 0);
+
   const pieDataTerms = [
     {name:"30 дней", value: activeDeals.filter(d=>d.term<=30).reduce((s,d)=>s+d.amount,0)||15000, fill:B.accent},
     {name:"60 дней", value: activeDeals.filter(d=>d.term>30&&d.term<=60).reduce((s,d)=>s+d.amount,0), fill:B.purple},
@@ -2605,6 +3347,66 @@ function DashboardPage({pushNav, setToast, currentUser}) {
         periodValue={fmtByn(Math.round(bankIncome / 1.08))}
         tooltip="15.5% от суммы дисконтов"/>
     </div>
+
+    {/* ─── Recover phase row — возврат средств от должников ─── */}
+    <Card className="p-4 mb-6" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wider flex items-center gap-2" style={{color: B.t2}}>
+            <span className="text-base">🔄</span>
+            Фаза возврата от должников
+          </h3>
+          <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+            Деньги уже выплачены клиентам — ждём их обратно от должников
+          </div>
+        </div>
+      </div>
+      <div className="grid grid-cols-4 gap-3">
+        <Card className="p-3" style={{background: "white"}}>
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: "#EEF2FF"}}>
+              <Clock size={14} style={{color: "#6366F1"}}/>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>Ждём платёж</div>
+          </div>
+          <div className="text-lg font-black" style={{color: B.t1}}>{awaitingDebtorAsgs.length}</div>
+          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(awaitingDebtorAmount)}</div>
+        </Card>
+
+        <Card className="p-3" style={{background: "white", borderColor: debtorOverdueAsgs.length > 0 ? B.red + "40" : undefined}}>
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: B.redL}}>
+              <AlertTriangle size={14} style={{color: B.red}} className={debtorOverdueAsgs.length > 0 ? "animate-pulse" : ""}/>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>Просрочка должника</div>
+          </div>
+          <div className="text-lg font-black" style={{color: debtorOverdueAsgs.length > 0 ? B.red : B.t3}}>{debtorOverdueAsgs.length}</div>
+          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(debtorOverdueAmount)}</div>
+        </Card>
+
+        <Card className="p-3" style={{background: "white", borderColor: debtorDefaultedAsgs.length > 0 ? "#991B1B40" : undefined}}>
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: "#FEE2E2"}}>
+              <span style={{fontSize: 14}}>⚖️</span>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>Юр.отдел</div>
+          </div>
+          <div className="text-lg font-black" style={{color: debtorDefaultedAsgs.length > 0 ? "#991B1B" : B.t3}}>{debtorDefaultedAsgs.length}</div>
+          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(debtorDefaultedAmount)}</div>
+        </Card>
+
+        <Card className="p-3" style={{background: "white"}}>
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: B.greenL}}>
+              <CheckCircle size={14} style={{color: B.green}}/>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>Закрыто (год)</div>
+          </div>
+          <div className="text-lg font-black" style={{color: B.green}}>{closedSuccessAsgs.length}</div>
+          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>заработано {fmtByn(totalEarnedFromClosed)}</div>
+        </Card>
+      </div>
+    </Card>
 
     <div className="grid grid-cols-2 gap-6">
       {/* Portfolio by term */}
@@ -2761,11 +3563,21 @@ const ASSIGNMENT_STAGES = [
     actionHint:"Клиент подписывает ДС ЭЦП в своём кабинете", whoActs:"👤 Клиент (поставщик)"},
   {id:"payment_approved", label:"Разрешение на оплату", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"pay",
     actionHint:"УСКО: проверить реквизиты → разрешить оплату в АБС", whoActs:"🏦 УСКО-специалист"},
-  {id:"paid", label:"Оплачено", color:"#059669", role:"—", actor:"system", phase:"pay",
-    actionHint:"Средства поступили клиенту через АБС банка", whoActs:"⚙ Система"},
+  {id:"paid", label:"Оплачено клиенту", color:"#0891B2", role:"—", actor:"system", phase:"pay",
+    actionHint:"Средства поступили поставщику. Ожидаем возврат от должника", whoActs:"⚙ Система → 🚚 Должник"},
+
+  // ═══ Recover phase — фаза возврата средств от должника ═══
+  {id:"awaiting_debtor", label:"Ждём оплату от должника", color:"#6366F1", role:"system", actor:"debtor", phase:"recover",
+    actionHint:"Должник должен перечислить средства банку до срока платежа", whoActs:"🚚 Должник"},
+  {id:"debtor_overdue", label:"Просрочка должника", color:"#DC2626", role:"credit_ops", actor:"bank", phase:"recover",
+    actionHint:"Кредитный менеджер: напомнить / предъявить претензию / эскалировать", whoActs:"🏦 Кредитный менеджер"},
+  {id:"debtor_defaulted", label:"Дефолт — юр.отдел", color:"#991B1B", role:"legal", actor:"bank", phase:"recover",
+    actionHint:"Передача дела в юр.отдел для взыскания через суд", whoActs:"🏦 Юр.отдел"},
+  {id:"debtor_paid", label:"Должник погасил — уступка закрыта", color:"#059669", role:"—", actor:"system", phase:"recover",
+    actionHint:"Средства получены, уступка закрыта успешно. Банк заработал дисконт", whoActs:"⚙ Система"},
 ];
 
-// ─── 4 логические фазы для UI (упрощение 10 микро-этапов) ───
+// ─── 5 логических фаз для UI (раньше было 4 — добавлена "recover") ───
 const ASSIGNMENT_PHASES = [
   {id:"docs", label:"Документы", icon:"📄",
     description:"Загрузка комплекта и подтверждение должником",
@@ -2779,10 +3591,14 @@ const ASSIGNMENT_PHASES = [
     description:"Банк формирует ДС и обе стороны подписывают",
     actorsInvolved:"🏦 УСКО + 🏦 Подписант + 👤 Клиент",
     bankAction:"Сформировать ДС → подписать ЭЦП → ждать клиента"},
-  {id:"pay", label:"Оплата", icon:"💰",
-    description:"УСКО разрешает оплату, платформа проводит",
+  {id:"pay", label:"Оплата клиенту", icon:"💰",
+    description:"УСКО разрешает оплату, АБС перечисляет клиенту",
     actorsInvolved:"🏦 УСКО-специалист",
     bankAction:"Проверить реквизиты → разрешить оплату в АБС"},
+  {id:"recover", label:"Возврат от должника", icon:"🔄",
+    description:"Ожидание платежа от должника, взыскание при просрочке",
+    actorsInvolved:"🚚 Должник → 🏦 Кредитный менеджер → 🏦 Юр.отдел",
+    bankAction:"Мониторить платёж → при просрочке: напомнить/претензия/суд"},
 ];
 
 function getAssignmentPhase(stage) {
@@ -2800,6 +3616,10 @@ const ASSIGNMENT_SLA_LIMITS = {
   ds_signing_bank: {days:1, actor:"bank"},
   ds_signing_client: {days:3, actor:"supplier"},
   payment_approved: {days:1, actor:"bank"},
+  // Recover phase SLA
+  awaiting_debtor: {days:60, actor:"debtor"}, // typical factoring term 30-90 days; avg 60
+  debtor_overdue: {days:14, actor:"bank"},    // credit_ops has 14 days to resolve before default
+  debtor_defaulted: {days:90, actor:"bank"},  // legal has 90 days for court proceedings
 };
 
 const CLIENT_ACTIVITY_THRESHOLDS = {normal:1, warning:3, urgent:7};
@@ -2832,6 +3652,21 @@ function isAssignmentDebtorPaymentOverdue(asg) {
     const now = new Date();
     return now > due && !asg.debtorRepaid;
   } catch(e) { return false; }
+}
+
+// ─── Assignment lifecycle helpers for recover phase ───
+// isAssignmentPaidToClient — deal выплачен клиенту (прошёл фазу pay)
+// Note: после paid уступка живёт в фазе recover
+function isAssignmentPaidToClient(asg) {
+  return ["paid", "awaiting_debtor", "debtor_overdue", "debtor_defaulted", "debtor_paid"].includes(asg.stage);
+}
+// isAssignmentFullyClosed — полностью закрыто (должник погасил)
+function isAssignmentFullyClosed(asg) {
+  return asg.stage === "debtor_paid";
+}
+// isAssignmentActiveForBank — ещё в работе банка (до полного закрытия)
+function isAssignmentActiveForBank(asg) {
+  return asg.stage !== "debtor_paid";
 }
 function isAssignmentWaitingClient(asg) {
   const info = getAssignmentSlaInfo(asg);
@@ -7289,8 +8124,9 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
   const expandedBool = typeof expanded === "string" ? expanded === "true" : expanded;
   const setExpandedBool = (v) => setExpanded(Boolean(v));
 
-  // Exclude final state "paid" and error state "returned_to_supplier" from main funnel
-  const activeAssignments = (assignmentsData || []).filter(a => a.stage !== "paid");
+  // Exclude fully-closed cycle ("debtor_paid") and unreachable error state ("returned_to_supplier") from main funnel
+  // Note: "paid" is no longer a terminal state — it transitions to "awaiting_debtor"
+  const activeAssignments = (assignmentsData || []).filter(a => a.stage !== "debtor_paid");
 
   // Phase stats
   const phaseStats = ASSIGNMENT_PHASES.map(phase => {
@@ -7590,7 +8426,9 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
             const sla = getAssignmentSlaInfo(a);
             const bankOver = isAssignmentBankOverdue(a);
             const waitingClient = isAssignmentWaitingClient(a);
-            const isPaid = a.stage === "paid";
+            const isClosed = a.stage === "debtor_paid"; // fully closed cycle
+            const isPaidToClient = a.stage === "paid"; // paid to client, awaiting debtor
+            const isDebtorOverdue = a.stage === "debtor_overdue" || a.stage === "debtor_defaulted";
             const isChecked = selectedIds?.includes(a.id);
 
             return <tr key={a.id}
@@ -7598,12 +8436,12 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
               className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
               style={{
                 borderColor: B.border,
-                background: bankOver ? "#FEF2F2" : isPaid ? "#F0FDF4" : isChecked ? B.accentL + "30" : "white"
+                background: isDebtorOverdue ? "#FEE2E2" : bankOver ? "#FEF2F2" : isClosed ? "#F0FDF4" : isPaidToClient ? "#EEF2FF" : isChecked ? B.accentL + "30" : "white"
               }}>
               {batchMode && <td className="px-2 py-2 text-center">
                 <input type="checkbox" checked={isChecked} onChange={()=>toggleSelect(a.id)} onClick={e=>e.stopPropagation()} className="cursor-pointer"/>
               </td>}
-              <td className="px-3 py-2 mono font-semibold" style={{color: isPaid ? B.green : B.accent}}>{a.id}</td>
+              <td className="px-3 py-2 mono font-semibold" style={{color: isClosed ? B.green : isDebtorOverdue ? B.red : B.accent}}>{a.id}</td>
               <td className="px-3 py-2 mono text-[10px]" style={{color: B.t3}}>{a.dealId}</td>
               <td className="px-3 py-2 truncate max-w-[180px]" style={{color: B.t1}}>{supplier?.name || "—"}</td>
               <td className="px-3 py-2 truncate max-w-[180px]" style={{color: B.t2}}>{debtor?.name || "—"}</td>
@@ -7621,7 +8459,13 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
                 </div>
               </td>
               <td className="px-3 py-2 text-right">
-                {isPaid ? <span className="text-[10px]" style={{color: B.green}}>✓</span>
+                {isClosed ? <span className="text-[10px]" style={{color: B.green}}>✓ Закрыта</span>
+                  : a.stage === "awaiting_debtor" && a.dueDate ? <span className="text-[10px] mono" style={{color: "#6366F1"}}>
+                      до {a.dueDate.slice(5)}
+                    </span>
+                  : a.stage === "debtor_overdue" ? <span className="text-[10px] font-bold" style={{color: B.red}}>
+                      +{a.overdueDays || 0}д
+                    </span>
                   : <div className="inline-flex items-center gap-1.5">
                     <span className="mono font-bold text-[11px]" style={{color: bankOver ? B.orange : (waitingClient && sla.overdue) ? B.red : B.t2}}>
                       {sla.days}д{sla.limit > 0 ? ` / ${sla.limit}` : ""}
@@ -7655,7 +8499,8 @@ function AssignmentPhaseWorkflow({asg, compact=false}) {
   const currentStage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
   const phaseIdx = ASSIGNMENT_PHASES.findIndex(p => p.id === currentPhase);
   const isReturned = asg.stage === "returned_to_supplier";
-  const isPaid = asg.stage === "paid";
+  const isFullyClosed = asg.stage === "debtor_paid";
+  const isDebtorIssue = asg.stage === "debtor_overdue" || asg.stage === "debtor_defaulted";
 
   if (isReturned) {
     return <Card className="p-3 mb-4" style={{background: B.redL, borderColor: "#FECACA", borderWidth: 2}}>
@@ -7670,9 +8515,16 @@ function AssignmentPhaseWorkflow({asg, compact=false}) {
   return <Card className="p-3 mb-4">
     <div className="flex items-center gap-1">
       {ASSIGNMENT_PHASES.map((phase, idx) => {
-        const isDone = isPaid || idx < phaseIdx;
-        const isCurrent = idx === phaseIdx && !isPaid;
-        const color = isDone ? B.green : isCurrent ? B.accent : B.border;
+        const isDone = isFullyClosed || idx < phaseIdx;
+        const isCurrent = idx === phaseIdx && !isFullyClosed;
+        // Recover phase gets special color treatment
+        let color;
+        if (isDone) color = B.green;
+        else if (isCurrent && isDebtorIssue) color = B.red;
+        else if (isCurrent && phase.id === "recover") color = "#6366F1";
+        else if (isCurrent) color = B.accent;
+        else color = B.border;
+
         return <React.Fragment key={phase.id}>
           <div className="flex-1 flex flex-col items-center gap-1 relative">
             <div className="w-10 h-10 rounded-xl flex items-center justify-center text-lg font-black"
@@ -7825,7 +8677,7 @@ function AssignmentBadge({asg}) {
 function AssignmentCard({asg, onClick}) {
   const stage = ASSIGNMENT_STAGES.find(s=>s.id===asg.stage);
   const bankOver = isAssignmentBankOverdue(asg);
-  const isDone = asg.stage === "paid";
+  const isDone = asg.stage === "debtor_paid"; // полностью закрыто
   const isReturned = asg.stage === "returned_to_supplier";
   const creditor = COMPANIES.find(c=>c.id===asg.creditorId);
   const debtor = COMPANIES.find(c=>c.id===asg.debtorId);
@@ -7977,6 +8829,8 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
   const [returnToUskoComment, setReturnToUskoComment] = useState("");
   const [paymentVerified, setPaymentVerified] = useState(false);
   const [paymentDangerModal, setPaymentDangerModal] = useState(false);
+  const [escalateLegalModal, setEscalateLegalModal] = useState(false);
+  let secondaryAction = null;
 
   // Final / non-actionable state
   if (asg.stage === "paid") return null;
@@ -8091,11 +8945,57 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       disabled: signing || !paymentVerified,
       onClick: () => setPaymentDangerModal(true),
     };
+  } else if (asg.stage === "awaiting_debtor") {
+    // Credit ops can mark payment received manually (fallback if АБС не засинхронилась)
+    primaryAction = {
+      label: signing ? "Подтверждение..." : "✓ Должник оплатил (вручную)",
+      icon: signing ? Loader2 : CheckCircle,
+      disabled: signing,
+      onClick: () => doAdvance("debtor_paid", {debtorPaidDate: "2026-03-26", bankEarned: asg.discount}, `💚 Уступка закрыта. Банк заработал ${fmtByn(asg.discount || 0)}`),
+    };
+    secondaryAction = {
+      label: "📧 Напомнить должнику",
+      icon: Mail,
+      onClick: () => setToast && setToast({msg: "Напоминание отправлено должнику", type: "success"}),
+    };
+  } else if (asg.stage === "debtor_overdue") {
+    // Credit ops works overdue — can send reminder / escalate to default
+    primaryAction = {
+      label: signing ? "Отправка..." : "📧 Отправить претензию",
+      icon: signing ? Loader2 : Mail,
+      disabled: signing,
+      onClick: () => {
+        const newReminders = (asg.remindersSent || 0) + 1;
+        doAdvance("debtor_overdue", {remindersSent: newReminders}, `Претензия #${newReminders} отправлена должнику`);
+      },
+    };
+    secondaryAction = {
+      label: "⚖️ Передать юр.отделу",
+      icon: AlertTriangle,
+      onClick: () => setEscalateLegalModal(true),
+    };
+  } else if (asg.stage === "debtor_defaulted") {
+    // Legal team — mark as recovered (won) or written off (lost)
+    primaryAction = {
+      label: signing ? "..." : "✓ Средства взысканы судом",
+      icon: signing ? Loader2 : CheckCircle,
+      disabled: signing,
+      onClick: () => doAdvance("debtor_paid", {debtorPaidDate: "2026-03-26", recoveredThroughCourt: true}, "Средства взысканы через суд. Уступка закрыта"),
+    };
+    secondaryAction = {
+      label: "Списать как безнадёжная",
+      icon: XCircle,
+      onClick: () => setToast && setToast({msg: "Операция недоступна в прототипе", type: "info"}),
+    };
   }
 
   // Payment confirmation (triggered from modal)
   const executePaymentApproval = () => {
-    doAdvance("paid", {paymentApprovedBy: currentUser.name, paymentApprovedDate: "2026-03-26", paidDate: "2026-03-26"}, `💰 Оплата ${fmtByn(asg.toReceive || 0)} разрешена в АБС. Средства поступят клиенту`);
+    // After payment to client, start awaiting_debtor phase
+    const dueDate = new Date("2026-03-26");
+    dueDate.setDate(dueDate.getDate() + 60); // 60 days default payment term
+    const dueDateStr = dueDate.toISOString().slice(0, 10);
+    doAdvance("paid", {paymentApprovedBy: currentUser.name, paymentApprovedDate: "2026-03-26", paidDate: "2026-03-26", dueDate: dueDateStr}, `💰 Оплата ${fmtByn(asg.toReceive || 0)} в АБС. Теперь ждём возврата от должника до ${dueDateStr}`);
   };
 
   return <>
@@ -8237,10 +9137,15 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
           Формирование дополнительного соглашения (ДС)
         </div>
 
-        {/* Summary of what DS will contain */}
+        {/* Summary of what DS will contain — with auto-calc explanation */}
         <div className="p-3 rounded-xl mb-3" style={{background: B.accentL + "40", borderLeft: `3px solid ${B.accent}`}}>
-          <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.accent}}>
-            Данные в ДС
+          <div className="flex items-center justify-between">
+            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.accent}}>
+              Данные в ДС (автоматический расчёт)
+            </div>
+            <span className="text-[9px] px-1.5 py-0.5 rounded" style={{background: "white", color: B.accent}}>
+              🧮 Калькулятор
+            </span>
           </div>
           <div className="grid grid-cols-3 gap-3 mt-2 text-[11px]">
             <div><span style={{color: B.t3}}>Сумма уступки:</span> <strong className="mono" style={{color: B.t1}}>{fmtByn(asg.amount || 0)}</strong></div>
@@ -8250,6 +9155,18 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             <div><span style={{color: B.t3}}>ТТН:</span> <strong className="mono" style={{color: B.t1}}>{asg.ttnNumber || "—"}</strong></div>
             <div><span style={{color: B.t3}}>Отгрузка:</span> <strong style={{color: B.t1}}>{asg.shippingDate || "—"}</strong></div>
           </div>
+          {(() => {
+            // Show formula and recalculation
+            const creditor = COMPANIES.find(c => c.id === asg.creditorId);
+            const rate = creditor?.rate || 25;
+            const term = DEFAULT_ASSIGNMENT_TERM_DAYS;
+            const calc = calculateAssignmentEconomics({amount: asg.amount, rate, termDays: term});
+            return <div className="mt-2 pt-2 border-t border-dashed text-[9px] font-mono" style={{borderColor: B.border, color: B.t3}}>
+              📐 Формула: дисконт = сумма × ставка × срок ÷ 365 = {asg.amount} × {rate}% × {term}д ÷ 365 = <strong style={{color: B.red}}>{fmtByn(calc.discount)}</strong>
+              <br/>
+              💰 Доход банка (65.5% от дисконта): <strong style={{color: B.green}}>{fmtByn(calc.bankIncome)}</strong>
+            </div>;
+          })()}
         </div>
 
         {/* Generation progress */}
@@ -8435,6 +9352,15 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             ↩ Вернуть поставщику на доработку
           </button>
         </div>}
+
+        {/* Secondary action for recover phase */}
+        {secondaryAction && <div className="mt-2">
+          <Btn variant="ghost" icon={secondaryAction.icon}
+            className="w-full"
+            onClick={secondaryAction.onClick}>
+            {secondaryAction.label}
+          </Btn>
+        </div>}
       </div>
     </Card>
 
@@ -8550,7 +9476,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
         </div>
         <div className="flex gap-2">
           <Btn variant="ghost" onClick={() => setShowDsPreview(false)} className="flex-1">Закрыть</Btn>
-          <Btn variant="secondary" icon={Download} onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})} className="flex-1">Скачать PDF</Btn>
+          <Btn variant="secondary" icon={Download} onClick={() => generateAgreementPDF(asg, creditor, debtor, setToast)} className="flex-1">Скачать PDF</Btn>
         </div>
       </div>
     </Modal>
@@ -8568,6 +9494,24 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       coolDownSec={3}
       icon={CheckCircle}
       accent={B.green}
+    />
+
+    {/* ─── Escalate to legal modal (debtor_defaulted) ─── */}
+    <DangerConfirmModal
+      open={escalateLegalModal}
+      onClose={() => setEscalateLegalModal(false)}
+      onConfirm={() => {
+        const courtCase = `А-${Math.floor(Math.random() * 900 + 100)}/2026`;
+        doAdvance("debtor_defaulted", {defaultedDate: "2026-03-26", courtCaseNumber: courtCase, legal_assigned: "Кузнецов А.П."}, `⚖️ Передано юр.отделу. Дело ${courtCase}`);
+      }}
+      title="Передать в юр.отдел?"
+      description="Уступка будет признана дефолтной. Юр.отдел подготовит исковое заявление в суд. Досудебное урегулирование завершено."
+      amount={asg.amount || 0}
+      recipient={`Должник: ${debtor?.name || "—"}`}
+      actionLabel="ПЕРЕДАТЬ"
+      coolDownSec={3}
+      icon={AlertTriangle}
+      accent={B.red}
     />
   </>;
 }
@@ -8874,6 +9818,11 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
   return <div>
     <PageHeader title={`Уступка ${asg.id}`} subtitle={creditor?.name} breadcrumbs={["Уступки", asg.dealId, asg.id]} onBack={onBack}
       actions={<div className="flex items-center gap-2">
+        {/* PDF button — only show after DS is generated */}
+        {asg.dsNumber && <Btn size="sm" variant="ghost" icon={Download}
+          onClick={() => generateAgreementPDF(asg, creditor, debtor, setToast)}>
+          ДС PDF
+        </Btn>}
         {/* Link to parent deal */}
         <button onClick={()=>{if(typeof window!=="undefined")window.dispatchEvent(new CustomEvent("oborotka:nav",{detail:{page:"pipeline"}}))}}
           className="text-[10px] px-2 py-1 rounded-lg hover:bg-slate-100 flex items-center gap-1"
@@ -8962,6 +9911,59 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
             {asg.toReceive && <div><span style={{color:B.t3}}>К получению:</span><div className="font-bold mt-0.5" style={{color:B.green}}>{fmtByn(asg.toReceive)}</div></div>}
             {asg.discount && <div><span style={{color:B.t3}}>Дисконт:</span><div className="font-bold mt-0.5" style={{color:B.red}}>{fmtByn(asg.discount)}</div></div>}
           </div>
+        </Card>
+
+        {/* ═══ ГРАФИК ПЛАТЕЖЕЙ (по транше) ═══ */}
+        <Card className="p-5">
+          <div className="flex items-start justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold flex items-center gap-2" style={{color: B.t1}}>
+                <Calendar size={14} style={{color: B.accent}}/>
+                График платежей
+              </h3>
+              <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                По транше {asg.id} · автоматический расчёт
+              </div>
+            </div>
+            <span className="text-[9px] px-2 py-0.5 rounded" style={{background: "#EEF2FF", color: "#6366F1"}}>
+              Выгружается в АБС
+            </span>
+          </div>
+          {(() => {
+            const schedule = generatePaymentSchedule(asg);
+            if (schedule.length === 0) return <div className="text-[11px] py-3 text-center" style={{color: B.t3}}>
+              График будет сформирован после разрешения оплаты в АБС
+            </div>;
+            return <table className="w-full text-[11px]">
+              <thead><tr className="border-b" style={{borderColor: B.border}}>
+                <th className="text-left p-1.5" style={{color: B.t3}}>Тип платежа</th>
+                <th className="text-right p-1.5" style={{color: B.t3}}>Сумма</th>
+                <th className="text-left p-1.5" style={{color: B.t3}}>Срок</th>
+                <th className="text-left p-1.5" style={{color: B.t3}}>Статус</th>
+              </tr></thead>
+              <tbody>{schedule.map((p, i) => {
+                const statusConfig = {
+                  paid: {bg: B.greenL, color: B.green, label: "✓ Оплачено"},
+                  pending: {bg: "#EEF2FF", color: "#6366F1", label: "○ Ожидание"},
+                  overdue: {bg: B.redL, color: B.red, label: "⚠ Просрочка"},
+                };
+                const cfg = statusConfig[p.status];
+                return <tr key={i} className="border-b" style={{borderColor: B.border}}>
+                  <td className="p-1.5">
+                    <div style={{color: B.t1}}>{p.label}</div>
+                    {p.comment && <div className="text-[9px] mt-0.5" style={{color: B.t3}}>{p.comment}</div>}
+                  </td>
+                  <td className="p-1.5 text-right mono font-bold" style={{color: B.t1}}>{fmtByn(p.amount)}</td>
+                  <td className="p-1.5 mono" style={{color: B.t2}}>{p.dueDate}</td>
+                  <td className="p-1.5">
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{background: cfg.bg, color: cfg.color}}>
+                      {cfg.label}
+                    </span>
+                  </td>
+                </tr>;
+              })}</tbody>
+            </table>;
+          })()}
         </Card>
 
         {/* History */}
@@ -9189,23 +10191,28 @@ function AssignmentsPage({currentUser, setToast}) {
   const bankOverdue = assignmentsData.filter(isAssignmentBankOverdue);
 
   // KPI stats
-  const activeCount = assignmentsData.filter(a => a.stage !== "paid" && a.stage !== "returned_to_supplier").length;
+  // Active = в работе банка (до debtor_paid)
+  const activeCount = assignmentsData.filter(a => a.stage !== "debtor_paid" && a.stage !== "returned_to_supplier").length;
+  // Paid to client last month — включает все post-paid стадии
   const paidMonthCount = assignmentsData.filter(a => {
-    if (a.stage !== "paid") return false;
-    const d = new Date(a.stageStartDate);
+    if (!isAssignmentPaidToClient(a)) return false;
+    if (!a.paidDate) return false;
+    const d = new Date(a.paidDate);
     const now = new Date("2026-03-26");
     return (now - d) / 86400000 <= 30;
   }).length;
-  const totalVolume = assignmentsData.filter(a => a.stage === "paid").reduce((s, a) => s + a.amount, 0);
+  // Total volume = сумма выплаченных клиенту (независимо от возврата)
+  const totalVolume = assignmentsData.filter(isAssignmentPaidToClient).reduce((s, a) => s + a.amount, 0);
+  // Avg turnover — от создания до выплаты клиенту
   const avgTurnover = (() => {
-    const paid = assignmentsData.filter(a => a.stage === "paid");
-    if (paid.length === 0) return null;
-    const totalDays = paid.reduce((s, a) => {
+    const paidToClient = assignmentsData.filter(a => isAssignmentPaidToClient(a) && a.paidDate);
+    if (paidToClient.length === 0) return null;
+    const totalDays = paidToClient.reduce((s, a) => {
       const created = new Date(a.createdDate);
-      const paidDate = new Date(a.stageStartDate);
+      const paidDate = new Date(a.paidDate);
       return s + Math.max(0, Math.floor((paidDate - created) / 86400000));
     }, 0);
-    return Math.round(totalDays / paid.length);
+    return Math.round(totalDays / paidToClient.length);
   })();
 
   // Batch operations
@@ -9280,43 +10287,47 @@ function AssignmentsPage({currentUser, setToast}) {
       onStageClick={(stageId) => setStageFilter(stageFilter === stageId ? "all" : stageId)}
     />
 
-    {/* KPI strip — phase-based, clickable to filter */}
-    <div className="grid grid-cols-5 gap-3 mb-5">
+    {/* KPI strip — 5 phases + SLA overdue, clickable to filter */}
+    <div className="grid grid-cols-6 gap-2.5 mb-5">
       {ASSIGNMENT_PHASES.map(phase => {
-        const items = assignmentsData.filter(a => a.stage !== "paid" && getAssignmentPhase(a.stage) === phase.id);
+        // "debtor_paid" = fully closed cycle — exclude from active counts
+        const items = assignmentsData.filter(a => a.stage !== "debtor_paid" && getAssignmentPhase(a.stage) === phase.id);
         const isActive = phaseFilter === phase.id;
         const count = items.length;
+        // Color-code the recover phase specially (indigo)
+        const phaseColor = phase.id === "recover" ? "#6366F1" : B.accent;
+        const phaseColorL = phase.id === "recover" ? "#EEF2FF" : B.accentL;
         return <button key={phase.id}
           onClick={() => {
             setPhaseFilter(phaseFilter === phase.id ? "all" : phase.id);
             setStageFilter("all");
           }}
           className="text-left">
-          <Card className="p-3 hover:shadow-md transition-all cursor-pointer"
-            style={isActive ? {borderColor: B.accent, borderWidth: 2} : {}}>
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 text-base" style={{background: isActive ? B.accent : B.accentL}}>
+          <Card className="p-2.5 hover:shadow-md transition-all cursor-pointer h-full"
+            style={isActive ? {borderColor: phaseColor, borderWidth: 2} : {}}>
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-sm" style={{background: isActive ? phaseColor : phaseColorL}}>
                 <span>{phase.icon}</span>
               </div>
               <div className="min-w-0 flex-1">
-                <div className="text-[10px] leading-tight" style={{color: B.t3}}>{phase.label}</div>
-                <div className="text-lg font-black" style={{color: count > 0 ? (isActive ? B.accent : B.t1) : B.t3}}>{count}</div>
+                <div className="text-[9px] leading-tight" style={{color: B.t3}}>{phase.label}</div>
+                <div className="text-base font-black" style={{color: count > 0 ? (isActive ? phaseColor : B.t1) : B.t3}}>{count}</div>
               </div>
             </div>
           </Card>
         </button>;
       })}
-      {/* Overdue SLA — always visible as 5th card */}
+      {/* Overdue SLA — always visible as 6th card */}
       <button onClick={()=>setViewMode(viewMode === "overdue" ? "all" : "overdue")} className="text-left">
-        <Card className="p-3 hover:shadow-md transition-all cursor-pointer"
+        <Card className="p-2.5 hover:shadow-md transition-all cursor-pointer h-full"
           style={viewMode === "overdue" ? {borderColor: B.red, borderWidth: 2} : {}}>
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{background: B.redL}}>
-              <AlertTriangle size={16} style={{color: B.red}} className={bankOverdue.length > 0 ? "animate-pulse" : ""}/>
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{background: B.redL}}>
+              <AlertTriangle size={14} style={{color: B.red}} className={bankOverdue.length > 0 ? "animate-pulse" : ""}/>
             </div>
             <div className="min-w-0">
-              <div className="text-[10px] leading-tight" style={{color: B.t3}}>Просрочка SLA</div>
-              <div className="text-lg font-black" style={{color: bankOverdue.length > 0 ? B.red : B.t3}}>{bankOverdue.length}</div>
+              <div className="text-[9px] leading-tight" style={{color: B.t3}}>SLA просрочка</div>
+              <div className="text-base font-black" style={{color: bankOverdue.length > 0 ? B.red : B.t3}}>{bankOverdue.length}</div>
             </div>
           </div>
         </Card>
@@ -9494,6 +10505,9 @@ function AuditLogPage({currentUser, setToast}) {
   const [userFilter, setUserFilter] = useState("all");
   const [actionFilter, setActionFilter] = useState("all");
   const [objectTypeFilter, setObjectTypeFilter] = useState("all");
+  const [severityFilter, setSeverityFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [pdnSubjectFilter, setPdnSubjectFilter] = useState(""); // UNP клиента для отчёта "Кто смотрел ПДн X"
   const [search, setSearch] = useState("");
 
   const users = [...new Set(AUDIT_LOG.map(l=>l.userName))];
@@ -9504,6 +10518,13 @@ function AuditLogPage({currentUser, setToast}) {
     if (userFilter !== "all" && log.userName !== userFilter) return false;
     if (actionFilter !== "all" && log.action !== actionFilter) return false;
     if (objectTypeFilter !== "all" && log.objectType !== objectTypeFilter) return false;
+    if (severityFilter !== "all" && log.severity !== severityFilter) return false;
+    if (categoryFilter !== "all" && log.category !== categoryFilter) return false;
+    if (pdnSubjectFilter) {
+      // Filter for "who accessed PDn of subject X"
+      const subjectId = log.affectedSubject?.id || log.affectedSubject?.unp;
+      if (String(subjectId || "").indexOf(pdnSubjectFilter) === -1) return false;
+    }
     if (search) {
       const q = search.toLowerCase();
       if (!(log.userName.toLowerCase().includes(q) ||
@@ -9514,22 +10535,24 @@ function AuditLogPage({currentUser, setToast}) {
   });
 
   const exportCsv = () => {
-    const header = "Дата;Пользователь;Роль;Действие;Тип объекта;ID объекта;IP\n";
+    const header = "Дата;Пользователь;Роль;Действие;Тип объекта;ID объекта;Severity;Category;IP;Subject;Data accessed;ECP\n";
     const rows = filtered.map(log =>
-      `${log.date};${log.userName};${ROLE_ACCESS[log.userRole]?.label||log.userRole};${AUDIT_ACTION_LABELS[log.action]||log.action};${log.objectType};${log.objectId};${log.details?.ipAddress||"—"}`
+      `${log.date};${log.userName};${ROLE_ACCESS[log.userRole]?.label||log.userRole};${AUDIT_ACTION_LABELS[log.action]||log.action};${log.objectType};${log.objectId};${log.severity||""};${log.category||""};${log.ipAddress||log.details?.ipAddress||"—"};${log.affectedSubject?.unp||log.affectedSubject?.id||""};"${(log.dataAccessed||[]).join(", ")}";${log.signedWithECP?"да":"нет"}`
     ).join("\n");
     const csv = header + rows;
-    const blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+    const blob = new Blob(["\ufeff" + csv], {type:"text/csv;charset=utf-8"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `audit-log-${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-    setToast({msg:"Журнал экспортирован в CSV",type:"success"});
+    setToast({msg:"Журнал экспортирован (compliance-формат)",type:"success"});
   };
 
-  const objectTypeLabels = {request:"Заявка", assignment:"Уступка", contract:"Договор", user:"Пользователь", stoplist:"Стоп-лист", settings:"Настройки"};
+  const objectTypeLabels = {request:"Заявка", assignment:"Уступка", contract:"Договор", user:"Пользователь", stoplist:"Стоп-лист", settings:"Настройки", consent:"Согласие", client:"Клиент"};
+  const categoryLabels = {auth:"Аутентификация", client_data:"Данные клиента", payment:"Платежи", consent:"Согласия ПДн", document:"Документы", external_request:"Внешние запросы", settings:"Настройки"};
+  const severityLabels = {info:"Информация", warning:"Предупреждение", critical:"Критично"};
 
   return <div>
     <PageHeader title="Журнал действий" breadcrumbs={["Журнал действий"]}
@@ -9555,9 +10578,20 @@ function AuditLogPage({currentUser, setToast}) {
       </div></Card>
     </div>
 
-    {/* Filters */}
+    {/* Compliance banner */}
+    <Card className="p-3 mb-4" style={{background: "#EEF2FF", borderLeft: `3px solid #6366F1`}}>
+      <div className="flex items-start gap-3">
+        <Shield size={16} style={{color: "#6366F1"}} className="shrink-0 mt-0.5"/>
+        <div className="text-[11px]" style={{color: B.t1}}>
+          <strong>Журнал доступа к ПДн</strong> — расширенный аудит с категориями и severity. Срок хранения: 5 лет (Закон 99-З о ПДн).
+          Используйте фильтр по УНП клиента для отчёта «Кто получал доступ к ПДн».
+        </div>
+      </div>
+    </Card>
+
+    {/* Filters — extended with compliance */}
     <Card className="p-4 mb-4">
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-3 gap-3 mb-3">
         <div>
           <label className="text-[10px] font-semibold block mb-1" style={{color:B.t3}}>Пользователь</label>
           <select value={userFilter} onChange={e=>setUserFilter(e.target.value)} className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200" style={{color:B.t1}}>
@@ -9579,11 +10613,45 @@ function AuditLogPage({currentUser, setToast}) {
             {objectTypes.map(o=><option key={o} value={o}>{objectTypeLabels[o]||o}</option>)}
           </select>
         </div>
+      </div>
+      <div className="grid grid-cols-4 gap-3">
+        <div>
+          <label className="text-[10px] font-semibold block mb-1" style={{color: "#6366F1"}}>🛡️ Severity</label>
+          <select value={severityFilter} onChange={e=>setSeverityFilter(e.target.value)} className="w-full px-2 py-1.5 text-xs rounded-lg border" style={{borderColor: "#6366F1" + "40", color:B.t1}}>
+            <option value="all">Все</option>
+            <option value="info">Информация</option>
+            <option value="warning">Предупреждение</option>
+            <option value="critical">Критично</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] font-semibold block mb-1" style={{color: "#6366F1"}}>🛡️ Категория</label>
+          <select value={categoryFilter} onChange={e=>setCategoryFilter(e.target.value)} className="w-full px-2 py-1.5 text-xs rounded-lg border" style={{borderColor: "#6366F1" + "40", color:B.t1}}>
+            <option value="all">Все</option>
+            <option value="auth">Аутентификация</option>
+            <option value="client_data">Данные клиента (ПДн)</option>
+            <option value="payment">Платежи</option>
+            <option value="consent">Согласия ПДн</option>
+            <option value="document">Документы</option>
+            <option value="external_request">Внешние запросы</option>
+            <option value="settings">Настройки</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] font-semibold block mb-1" style={{color: "#6366F1"}}>🛡️ УНП клиента (PDn-доступ)</label>
+          <input value={pdnSubjectFilter} onChange={e=>setPdnSubjectFilter(e.target.value)}
+            placeholder="напр. 169066611"
+            className="w-full px-2 py-1.5 text-xs rounded-lg border" style={{borderColor: "#6366F1" + "40", color:B.t1}}/>
+        </div>
         <div>
           <label className="text-[10px] font-semibold block mb-1" style={{color:B.t3}}>Поиск</label>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Пользователь, ID объекта..." className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-200" style={{color:B.t1}}/>
         </div>
       </div>
+      {pdnSubjectFilter && <div className="mt-3 p-2 rounded text-[10px]" style={{background: "#EEF2FF", color: "#6366F1"}}>
+        🛡️ <strong>Активен фильтр:</strong> доступ к данным субъекта ПДн с УНП {pdnSubjectFilter}. Найдено {filtered.length} событий.
+        Это отчёт по 99-З ст.10 — кто, когда и для какой цели обращался к ПДн данного клиента.
+      </div>}
     </Card>
 
     {/* Table */}
@@ -9595,12 +10663,20 @@ function AuditLogPage({currentUser, setToast}) {
             <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Пользователь</th>
             <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Действие</th>
             <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Объект</th>
+            <th className="px-3 py-2.5 text-left font-semibold" style={{color: "#6366F1"}}>🛡️ Категория</th>
+            <th className="px-3 py-2.5 text-left font-semibold" style={{color: "#6366F1"}}>🛡️ Severity</th>
             <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Детали</th>
-            <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>IP</th>
+            <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>IP / ЭЦП</th>
           </tr></thead>
-          <tbody>{filtered.length===0 ? <tr><td colSpan={6} className="px-3 py-10 text-center text-xs" style={{color:B.t3}}>Записи не найдены</td></tr>
+          <tbody>{filtered.length===0 ? <tr><td colSpan={8} className="px-3 py-10 text-center text-xs" style={{color:B.t3}}>Записи не найдены</td></tr>
             : filtered.map((log,i) => {
               const roleInfo = ROLE_ACCESS[log.userRole];
+              const sevColors = {
+                info: {bg: "#F1F5F9", color: B.t2},
+                warning: {bg: B.yellowL, color: B.yellow},
+                critical: {bg: B.redL, color: B.red},
+              };
+              const sevCfg = sevColors[log.severity] || sevColors.info;
               return <tr key={log.id} className={`border-b border-slate-50 ${i%2===1?"bg-slate-50/30":""}`}>
                 <td className="px-3 py-2.5 mono" style={{color:B.t3}}>{log.date}</td>
                 <td className="px-3 py-2.5">
@@ -9611,16 +10687,32 @@ function AuditLogPage({currentUser, setToast}) {
                 <td className="px-3 py-2.5">
                   <div className="text-[10px]" style={{color:B.t3}}>{objectTypeLabels[log.objectType]||log.objectType}</div>
                   <div className="mono font-semibold" style={{color:B.accent}}>{log.objectId}</div>
+                  {log.affectedSubject?.unp && <div className="text-[9px] mt-0.5 mono" style={{color: "#6366F1"}}>👤 УНП {log.affectedSubject.unp}</div>}
+                </td>
+                <td className="px-3 py-2.5">
+                  {log.category && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{background: "#EEF2FF", color: "#6366F1"}}>
+                    {categoryLabels[log.category] || log.category}
+                  </span>}
+                </td>
+                <td className="px-3 py-2.5">
+                  {log.severity && <span className="px-1.5 py-0.5 rounded text-[9px] font-bold" style={{background: sevCfg.bg, color: sevCfg.color}}>
+                    {severityLabels[log.severity] || log.severity}
+                  </span>}
                 </td>
                 <td className="px-3 py-2.5" style={{color:B.t2}}>
                   {log.details?.amount && <div>Сумма: <strong>{fmtByn(log.details.amount)}</strong></div>}
                   {log.details?.rate && <div>Ставка: {log.details.rate}%</div>}
-                  {log.details?.ecpUsed && <div style={{color:B.green}}>ЭЦП: ✓</div>}
                   {log.details?.comment && <div className="italic truncate max-w-[200px]">«{log.details.comment}»</div>}
                   {log.details?.issues && <div className="truncate max-w-[200px]">{log.details.issues.length} проблем</div>}
                   {log.details?.changed && <div>Изменено: {log.details.changed}</div>}
+                  {log.details?.purpose && <div className="text-[10px] italic">Цель: {log.details.purpose}</div>}
+                  {log.dataAccessed && log.dataAccessed.length > 0 && <div className="text-[10px] mt-0.5" style={{color: "#6366F1"}}>📊 Просмотр: {log.dataAccessed.join(", ")}</div>}
                 </td>
-                <td className="px-3 py-2.5 mono text-[10px]" style={{color:B.t3}}>{log.details?.ipAddress||"—"}</td>
+                <td className="px-3 py-2.5 text-[10px]" style={{color:B.t3}}>
+                  <div className="mono">{log.ipAddress || log.details?.ipAddress || "—"}</div>
+                  {log.signedWithECP && <div style={{color:B.green}}>🔐 ЭЦП ✓</div>}
+                  {log.userAgent && <div className="truncate max-w-[100px]">{log.userAgent}</div>}
+                </td>
               </tr>;
             })
           }</tbody>
@@ -10089,6 +11181,7 @@ function ClientsPage({pushNav, setToast}) {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedClient, setSelectedClient] = useState(null);
+  const [onboardingWizardOpen, setOnboardingWizardOpen] = useState(false);
 
   // Show only creditors (companies that take factoring). Debtors are contractors, handled separately.
   const creditors = COMPANIES.filter(c => c.role === "creditor");
@@ -10131,8 +11224,6 @@ function ClientsPage({pushNav, setToast}) {
     stoplist:  {label:"Стоп-лист",        icon:"🚫", color:B.red,      bg:"#FECACA",  description:"В стоп-листе банка"},
   };
 
-  if (selectedClient) return <ClientDetailView client={selectedClient} onBack={()=>setSelectedClient(null)} setToast={setToast}/>;
-
   // ─── Contractors (debtors) list filtering ───
   const filteredContractors = debtorsEnriched.filter(d => {
     if (search) {
@@ -10147,10 +11238,17 @@ function ClientsPage({pushNav, setToast}) {
   const clientsPagination = usePagination(filteredClients, PAGE_SIZE);
   const contractorsPagination = usePagination(filteredContractors, PAGE_SIZE);
 
+  // ─── Early return must come AFTER all hooks (React rules of hooks) ───
+  if (selectedClient) return <ClientDetailView client={selectedClient} onBack={()=>setSelectedClient(null)} setToast={setToast}/>;
+
   return <div>
     <PageHeader title={topTab === "clients" ? "Клиенты" : "Контрагенты-должники"}
       breadcrumbs={["Клиенты", topTab === "contractors" ? "Контрагенты" : undefined].filter(Boolean)}
-      actions={<ExportButton filename={topTab === "clients" ? "klienty" : "kontragenty"} setToast={setToast}
+      actions={<div className="flex items-center gap-2">
+        {topTab === "clients" && <Btn size="sm" variant="primary" icon={Plus} onClick={() => setOnboardingWizardOpen(true)}>
+          Зарегистрировать клиента
+        </Btn>}
+        <ExportButton filename={topTab === "clients" ? "klienty" : "kontragenty"} setToast={setToast}
         columns={topTab === "clients" ? [
           {key: "name", label: "Название"},
           {key: "unp", label: "УНП"},
@@ -10167,7 +11265,8 @@ function ClientsPage({pushNav, setToast}) {
           {key: "assignmentCount", label: "Кол-во уступок"},
           {key: "totalVolume", label: "Общая сумма"},
         ]}
-        rows={topTab === "clients" ? filteredClients : filteredContractors}/>}/>
+        rows={topTab === "clients" ? filteredClients : filteredContractors}/>
+      </div>}/>
 
     {/* Top tab selector: Clients (creditors) vs Contractors (debtors) */}
     <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 mb-5 inline-flex">
@@ -10345,12 +11444,676 @@ function ClientsPage({pushNav, setToast}) {
         <Pagination {...contractorsPagination} pageSize={PAGE_SIZE}/>
       </Card>
     </>}
+
+    {/* ═══ ONBOARDING WIZARD ═══ */}
+    {onboardingWizardOpen && <ClientOnboardingWizard
+      onClose={() => setOnboardingWizardOpen(false)}
+      onComplete={(clientData) => {
+        setOnboardingWizardOpen(false);
+        setToast && setToast({msg: `Клиент «${clientData.name}» зарегистрирован. Заявка отправлена на верификацию аналитика.`, type: "success"});
+      }}
+      setToast={setToast}/>}
+  </div>;
+}
+
+// ═══════════════════════════════════════
+// CLIENT ONBOARDING WIZARD (8 STEPS — compliance compliant)
+// ═══════════════════════════════════════
+function ClientOnboardingWizard({onClose, onComplete, setToast}) {
+  const TOTAL_STEPS = 8;
+  const [step, setStep] = useState(1);
+
+  // Form state — collected across all 8 steps
+  const [formData, setFormData] = useState({
+    // Step 1: Form type
+    formType: null, // "simple" | "extended"
+
+    // Step 2: General data
+    name: "",
+    unp: "",
+    okpo: "",
+    regDate: "",
+    legalAddress: "",
+    factualAddress: "",
+    sameAddress: true,
+    okeds: [],
+    mainOked: "",
+    residencyStatus: "RB_resident",
+    structureType: "simple",
+    phone: "",
+    email: "",
+    website: "",
+
+    // Step 3: Founders & beneficiaries
+    founders: [{fio: "", share: 100, type: "individual", isResidentRB: true, passport: ""}],
+    beneficiaries: [{fio: "", share: 100, isResidentRB: true, isPdl: false, passport: ""}],
+
+    // Step 4: Leadership
+    director: {fio: "", residencyRB: true, passport: "", appointmentOrder: ""},
+    chiefAccountant: {fio: "", residencyRB: true, passport: "", appointmentOrder: ""},
+    sameForBoth: false,
+
+    // Step 5: Stop-factors checklist
+    stopFactorsChecked: [],
+    stopFactorsFlagged: [],
+
+    // Step 6: Documents
+    documents: {
+      ustav: null, regCertificate: null,
+      directorPassport: null, accountantPassport: null,
+      authorizationOrder: null, beneficiariesList: null,
+      financialStatement: null,
+    },
+
+    // Step 7: Consents
+    consents: {
+      pdn_processing: false,
+      kr_inquiry: false,
+      legat_inquiry: false,
+      marketing: false,
+    },
+
+    // Step 8: confirmed
+    confirmed: false,
+  });
+
+  const update = (patch) => setFormData(prev => ({...prev, ...patch}));
+
+  // Step validation
+  const isStepValid = (s) => {
+    if (s === 1) return formData.formType != null;
+    if (s === 2) return formData.name && formData.unp && formData.unp.length >= 9 && formData.regDate && formData.legalAddress && formData.mainOked;
+    if (s === 3) return formData.founders.every(f => f.fio.trim()) && formData.beneficiaries.every(b => b.fio.trim());
+    if (s === 4) return formData.director.fio.trim() && formData.chiefAccountant.fio.trim();
+    if (s === 5) return true; // stop factors are optional checks
+    if (s === 6) return formData.documents.ustav && formData.documents.regCertificate && formData.documents.directorPassport;
+    if (s === 7) return formData.consents.pdn_processing && formData.consents.kr_inquiry; // обязательные
+    if (s === 8) return formData.confirmed;
+    return false;
+  };
+
+  // Auto-detect form type eligibility
+  const canUseSimpleForm = () => {
+    const allRBResidents =
+      formData.residencyStatus === "RB_resident" &&
+      formData.founders.every(f => f.isResidentRB) &&
+      formData.beneficiaries.every(b => b.isResidentRB) &&
+      formData.director.residencyRB &&
+      formData.chiefAccountant.residencyRB;
+    const simpleStructure = formData.structureType === "simple";
+    const noStopFactors = formData.stopFactorsFlagged.length === 0;
+    return {allRBResidents, simpleStructure, noStopFactors,
+      eligible: allRBResidents && simpleStructure && noStopFactors};
+  };
+
+  const submitForm = () => {
+    const clientData = {
+      name: formData.name,
+      unp: formData.unp,
+      regDate: formData.regDate,
+      director: formData.director.fio,
+      phone: formData.phone,
+      compliance: {
+        formType: formData.formType,
+        residencyStatus: formData.residencyStatus,
+        onboardingMethod: "msi",
+        onboardingDate: new Date().toISOString().slice(0, 10),
+        onboardingOperator: "Соколова О.А.",
+        stopFactors: {
+          checked: formData.stopFactorsChecked,
+          flagged: formData.stopFactorsFlagged,
+          lastChecked: new Date().toISOString().slice(0, 10),
+        },
+        consents: Object.entries(formData.consents).reduce((acc, [k, v]) => {
+          acc[k] = {signed: v, date: v ? new Date().toISOString().slice(0, 10) : null, method: v ? "ECP_GOSSUOK" : null};
+          return acc;
+        }, {}),
+        beneficiaries: formData.beneficiaries,
+        leadership: {director: formData.director, chiefAccountant: formData.chiefAccountant},
+        structureType: formData.structureType,
+        okeds: formData.okeds,
+        mainOked: formData.mainOked,
+      },
+    };
+    onComplete && onComplete(clientData);
+  };
+
+  const STEP_LABELS = [
+    "Тип формы",
+    "Общие данные",
+    "Учредители",
+    "Руководство",
+    "Стоп-факторы",
+    "Документы",
+    "Согласия ПДн",
+    "Подтверждение",
+  ];
+
+  return <Modal open={true} onClose={onClose} title={`Регистрация клиента — Шаг ${step} из ${TOTAL_STEPS}: ${STEP_LABELS[step - 1]}`}>
+    <div className="space-y-4">
+      {/* Progress bar */}
+      <div className="flex items-center gap-1">
+        {STEP_LABELS.map((label, idx) => {
+          const stepNum = idx + 1;
+          const isDone = stepNum < step;
+          const isCurrent = stepNum === step;
+          return <React.Fragment key={idx}>
+            <div className="flex-1 flex flex-col items-center gap-0.5">
+              <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold"
+                style={{
+                  background: isDone ? B.green : isCurrent ? B.accent : "#F1F5F9",
+                  color: isDone || isCurrent ? "white" : B.t3,
+                }}>
+                {isDone ? "✓" : stepNum}
+              </div>
+              <div className="text-[8px] text-center" style={{color: isCurrent ? B.accent : B.t3}}>{label}</div>
+            </div>
+            {idx < TOTAL_STEPS - 1 && <div className="h-0.5 flex-1 mt-3" style={{background: isDone ? B.green : "#F1F5F9"}}/>}
+          </React.Fragment>;
+        })}
+      </div>
+
+      {/* Step content */}
+      <div className="min-h-[300px]">
+        {step === 1 && <OnboardingStep1 formData={formData} update={update}/>}
+        {step === 2 && <OnboardingStep2 formData={formData} update={update}/>}
+        {step === 3 && <OnboardingStep3 formData={formData} update={update}/>}
+        {step === 4 && <OnboardingStep4 formData={formData} update={update}/>}
+        {step === 5 && <OnboardingStep5 formData={formData} update={update}/>}
+        {step === 6 && <OnboardingStep6 formData={formData} update={update} setToast={setToast}/>}
+        {step === 7 && <OnboardingStep7 formData={formData} update={update}/>}
+        {step === 8 && <OnboardingStep8 formData={formData} update={update} canUseSimpleForm={canUseSimpleForm}/>}
+      </div>
+
+      {/* Footer navigation */}
+      <div className="flex justify-between items-center pt-3 border-t" style={{borderColor: B.border}}>
+        <div className="flex gap-2">
+          <Btn variant="ghost" onClick={onClose}>Отмена</Btn>
+          {step > 1 && <Btn variant="secondary" icon={ChevronLeft} onClick={() => setStep(step - 1)}>Назад</Btn>}
+        </div>
+        <div className="text-[10px]" style={{color: B.t3}}>
+          {step}/{TOTAL_STEPS} · {STEP_LABELS[step - 1]}
+        </div>
+        {step < TOTAL_STEPS ? <Btn variant="primary" icon={ChevronRight} disabled={!isStepValid(step)} onClick={() => setStep(step + 1)}>
+          Далее
+        </Btn> : <Btn variant="success" icon={CheckCircle} disabled={!isStepValid(step)} onClick={submitForm}>
+          Зарегистрировать
+        </Btn>}
+      </div>
+    </div>
+  </Modal>;
+}
+
+// ═══ Step 1: Form type ═══
+function OnboardingStep1({formData, update}) {
+  return <div className="space-y-3">
+    <div className="text-xs" style={{color: B.t2}}>
+      Согласно регламенту банка и Закону 165-З, есть две формы анкеты клиента:
+    </div>
+    <div className="grid grid-cols-2 gap-3">
+      <button onClick={() => update({formType: "simple"})}
+        className="p-4 rounded-xl text-left hover:shadow-md transition-all"
+        style={{border: `2px solid ${formData.formType === "simple" ? B.green : B.border}`,
+          background: formData.formType === "simple" ? B.greenL : "white"}}>
+        <div className="text-2xl mb-2">📝</div>
+        <div className="text-sm font-bold" style={{color: B.t1}}>Упрощённая форма</div>
+        <div className="text-[10px] mt-1" style={{color: B.t2}}>
+          Применима если: ЮЛ и все бенефициары — резиденты РБ + простая структура учредителей + нет стоп-факторов
+        </div>
+      </button>
+      <button onClick={() => update({formType: "extended"})}
+        className="p-4 rounded-xl text-left hover:shadow-md transition-all"
+        style={{border: `2px solid ${formData.formType === "extended" ? B.accent : B.border}`,
+          background: formData.formType === "extended" ? B.accentL : "white"}}>
+        <div className="text-2xl mb-2">📋</div>
+        <div className="text-sm font-bold" style={{color: B.t1}}>Расширенная форма</div>
+        <div className="text-[10px] mt-1" style={{color: B.t2}}>
+          Применяется во всех остальных случаях. Дополнительные документы и проверки.
+        </div>
+      </button>
+    </div>
+    <div className="p-2.5 rounded-lg text-[10px]" style={{background: "#EEF2FF", color: "#6366F1"}}>
+      💡 Платформа автоматически проверит совместимость с упрощённой формой по итогам всех шагов
+    </div>
+  </div>;
+}
+
+// ═══ Step 2: General data ═══
+function OnboardingStep2({formData, update}) {
+  return <div className="grid grid-cols-2 gap-3 text-xs">
+    <div className="col-span-2">
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Полное наименование ЮЛ *</label>
+      <input value={formData.name} onChange={e => update({name: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}
+        placeholder="ООО «Название»"/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>УНП * (9 цифр)</label>
+      <input value={formData.unp} onChange={e => update({unp: e.target.value.replace(/\D/g, "").slice(0, 9)})}
+        className="w-full px-3 py-2 rounded-lg border mono" style={{borderColor: B.border}}
+        placeholder="100000000"/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>ОКПО</label>
+      <input value={formData.okpo} onChange={e => update({okpo: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border mono" style={{borderColor: B.border}}/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Дата регистрации *</label>
+      <input type="date" value={formData.regDate} onChange={e => update({regDate: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Резидентство *</label>
+      <select value={formData.residencyStatus} onChange={e => update({residencyStatus: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}>
+        <option value="RB_resident">Резидент РБ</option>
+        <option value="non_resident">Не резидент</option>
+      </select>
+    </div>
+    <div className="col-span-2">
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Юридический адрес *</label>
+      <input value={formData.legalAddress} onChange={e => update({legalAddress: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}
+        placeholder="г. Минск, ул. ..."/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Основной ОКЭД *</label>
+      <input value={formData.mainOked} onChange={e => update({mainOked: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border mono" style={{borderColor: B.border}}
+        placeholder="41.20"/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Тип учредительной структуры</label>
+      <select value={formData.structureType} onChange={e => update({structureType: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}>
+        <option value="simple">Простая</option>
+        <option value="complex">Сложная (цепочка)</option>
+      </select>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Телефон</label>
+      <input value={formData.phone} onChange={e => update({phone: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}
+        placeholder="+375 29 ..."/>
+    </div>
+    <div>
+      <label className="block mb-1 font-semibold" style={{color: B.t2}}>Email</label>
+      <input type="email" value={formData.email} onChange={e => update({email: e.target.value})}
+        className="w-full px-3 py-2 rounded-lg border" style={{borderColor: B.border}}/>
+    </div>
+  </div>;
+}
+
+// ═══ Step 3: Founders & beneficiaries ═══
+function OnboardingStep3({formData, update}) {
+  const updateFounder = (idx, patch) => {
+    const founders = [...formData.founders];
+    founders[idx] = {...founders[idx], ...patch};
+    update({founders});
+  };
+  const addFounder = () => update({founders: [...formData.founders, {fio: "", share: 0, type: "individual", isResidentRB: true, passport: ""}]});
+  const removeFounder = (idx) => update({founders: formData.founders.filter((_, i) => i !== idx)});
+
+  const updateBeneficiary = (idx, patch) => {
+    const beneficiaries = [...formData.beneficiaries];
+    beneficiaries[idx] = {...beneficiaries[idx], ...patch};
+    update({beneficiaries});
+  };
+  const addBeneficiary = () => update({beneficiaries: [...formData.beneficiaries, {fio: "", share: 0, isResidentRB: true, isPdl: false, passport: ""}]});
+  const removeBeneficiary = (idx) => update({beneficiaries: formData.beneficiaries.filter((_, i) => i !== idx)});
+
+  return <div className="space-y-4 text-xs">
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold" style={{color: B.t1}}>Учредители</div>
+        <Btn size="sm" variant="ghost" icon={Plus} onClick={addFounder}>Добавить</Btn>
+      </div>
+      <div className="space-y-2">{formData.founders.map((f, i) => <div key={i} className="grid grid-cols-12 gap-2 items-end p-2 rounded-lg" style={{background: "#F8FAFC"}}>
+        <div className="col-span-4">
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>ФИО / Название</label>
+          <input value={f.fio} onChange={e => updateFounder(i, {fio: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}}/>
+        </div>
+        <div className="col-span-2">
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Доля %</label>
+          <input type="number" value={f.share} onChange={e => updateFounder(i, {share: +e.target.value})} className="w-full px-2 py-1.5 rounded border mono" style={{borderColor: B.border}}/>
+        </div>
+        <div className="col-span-2">
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Тип</label>
+          <select value={f.type} onChange={e => updateFounder(i, {type: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}}>
+            <option value="individual">Физлицо</option>
+            <option value="legal">ЮЛ</option>
+          </select>
+        </div>
+        <div className="col-span-3 flex items-center">
+          <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+            <input type="checkbox" checked={f.isResidentRB} onChange={e => updateFounder(i, {isResidentRB: e.target.checked})}/>
+            Резидент РБ
+          </label>
+        </div>
+        <div className="col-span-1">
+          {formData.founders.length > 1 && <button onClick={() => removeFounder(i)} className="text-red-500 px-2 py-1.5"><X size={12}/></button>}
+        </div>
+      </div>)}</div>
+    </div>
+
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold" style={{color: B.t1}}>
+          Бенефициарные владельцы (≥25%)
+          <span className="ml-2 text-[10px] font-normal" style={{color: B.t3}}>важно для AML/KYC</span>
+        </div>
+        <Btn size="sm" variant="ghost" icon={Plus} onClick={addBeneficiary}>Добавить</Btn>
+      </div>
+      <div className="space-y-2">{formData.beneficiaries.map((b, i) => <div key={i} className="grid grid-cols-12 gap-2 items-end p-2 rounded-lg" style={{background: "#FEF3C7"}}>
+        <div className="col-span-4">
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>ФИО</label>
+          <input value={b.fio} onChange={e => updateBeneficiary(i, {fio: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}}/>
+        </div>
+        <div className="col-span-2">
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Доля %</label>
+          <input type="number" value={b.share} onChange={e => updateBeneficiary(i, {share: +e.target.value})} className="w-full px-2 py-1.5 rounded border mono" style={{borderColor: B.border}}/>
+        </div>
+        <div className="col-span-2 flex items-center">
+          <label className="flex items-center gap-1 text-[10px] cursor-pointer">
+            <input type="checkbox" checked={b.isResidentRB} onChange={e => updateBeneficiary(i, {isResidentRB: e.target.checked})}/>
+            Резидент РБ
+          </label>
+        </div>
+        <div className="col-span-3 flex items-center">
+          <label className="flex items-center gap-1 text-[10px] cursor-pointer" style={{color: b.isPdl ? B.red : B.t1}}>
+            <input type="checkbox" checked={b.isPdl} onChange={e => updateBeneficiary(i, {isPdl: e.target.checked})}/>
+            ⚠ ПДЛ/ИПДЛ
+          </label>
+        </div>
+        <div className="col-span-1">
+          {formData.beneficiaries.length > 1 && <button onClick={() => removeBeneficiary(i)} className="text-red-500 px-2 py-1.5"><X size={12}/></button>}
+        </div>
+      </div>)}</div>
+    </div>
+  </div>;
+}
+
+// ═══ Step 4: Leadership ═══
+function OnboardingStep4({formData, update}) {
+  const updateDirector = (patch) => update({director: {...formData.director, ...patch}});
+  const updateAccountant = (patch) => update({chiefAccountant: {...formData.chiefAccountant, ...patch}});
+
+  const isSamePerson = formData.director.fio && formData.director.fio === formData.chiefAccountant.fio;
+
+  return <div className="space-y-4 text-xs">
+    <div className="p-3 rounded-lg" style={{background: "#F8FAFC"}}>
+      <div className="font-semibold mb-2" style={{color: B.t1}}>Руководитель (Директор)</div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>ФИО *</label>
+          <input value={formData.director.fio} onChange={e => updateDirector({fio: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}}/>
+        </div>
+        <div>
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Серия и номер паспорта</label>
+          <input value={formData.director.passport} onChange={e => updateDirector({passport: e.target.value})} className="w-full px-2 py-1.5 rounded border mono" style={{borderColor: B.border}}/>
+        </div>
+        <div>
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Документ о полномочиях</label>
+          <input value={formData.director.appointmentOrder} onChange={e => updateDirector({appointmentOrder: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}} placeholder="Приказ №1 от ..."/>
+        </div>
+        <div className="flex items-center pt-4">
+          <label className="flex items-center gap-1 text-[11px] cursor-pointer">
+            <input type="checkbox" checked={formData.director.residencyRB} onChange={e => updateDirector({residencyRB: e.target.checked})}/>
+            Резидент РБ
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div className="p-3 rounded-lg" style={{background: "#F8FAFC"}}>
+      <div className="font-semibold mb-2" style={{color: B.t1}}>Главный бухгалтер</div>
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>ФИО *</label>
+          <input value={formData.chiefAccountant.fio} onChange={e => updateAccountant({fio: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}}/>
+        </div>
+        <div>
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Серия и номер паспорта</label>
+          <input value={formData.chiefAccountant.passport} onChange={e => updateAccountant({passport: e.target.value})} className="w-full px-2 py-1.5 rounded border mono" style={{borderColor: B.border}}/>
+        </div>
+        <div>
+          <label className="block mb-0.5 text-[10px]" style={{color: B.t3}}>Документ о полномочиях</label>
+          <input value={formData.chiefAccountant.appointmentOrder} onChange={e => updateAccountant({appointmentOrder: e.target.value})} className="w-full px-2 py-1.5 rounded border" style={{borderColor: B.border}} placeholder="Приказ №2 от ..."/>
+        </div>
+        <div className="flex items-center pt-4">
+          <label className="flex items-center gap-1 text-[11px] cursor-pointer">
+            <input type="checkbox" checked={formData.chiefAccountant.residencyRB} onChange={e => updateAccountant({residencyRB: e.target.checked})}/>
+            Резидент РБ
+          </label>
+        </div>
+      </div>
+    </div>
+
+    {isSamePerson && <div className="p-2.5 rounded-lg text-[10px]" style={{background: B.redL, color: B.red}}>
+      ⚠ <strong>Стоп-фактор:</strong> руководитель и главбух — одно лицо. Это автоматически переключит вас на расширенную форму анкеты.
+    </div>}
+  </div>;
+}
+
+// ═══ Step 5: Stop-factors checklist ═══
+function OnboardingStep5({formData, update}) {
+  const toggleChecked = (id) => {
+    const checked = formData.stopFactorsChecked.includes(id)
+      ? formData.stopFactorsChecked.filter(x => x !== id)
+      : [...formData.stopFactorsChecked, id];
+    update({stopFactorsChecked: checked});
+  };
+  const toggleFlagged = (id) => {
+    const flagged = formData.stopFactorsFlagged.includes(id)
+      ? formData.stopFactorsFlagged.filter(x => x !== id)
+      : [...formData.stopFactorsFlagged, id];
+    update({stopFactorsFlagged: flagged});
+  };
+
+  const sevColor = {
+    critical: B.red,
+    high: "#EA580C",
+    medium: B.yellow,
+  };
+
+  return <div className="space-y-2 text-xs max-h-[400px] overflow-y-auto">
+    <div className="text-[10px] mb-2" style={{color: B.t3}}>
+      Комплаенс-офицер проверяет каждый стоп-фактор. Отметьте «Проверено» — для всех проверенных, «Выявлено» — если фактор обнаружен у клиента.
+    </div>
+    {STOP_FACTORS.map(sf => {
+      const isChecked = formData.stopFactorsChecked.includes(sf.id);
+      const isFlagged = formData.stopFactorsFlagged.includes(sf.id);
+      return <div key={sf.id} className="p-2 rounded-lg flex items-center justify-between gap-2" style={{
+        background: isFlagged ? B.redL : isChecked ? B.greenL : "#F8FAFC",
+        borderLeft: `3px solid ${sevColor[sf.severity] || B.t3}`,
+      }}>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium" style={{color: B.t1}}>{sf.label}</div>
+          <div className="text-[9px]" style={{color: B.t3}}>{sf.basis} · severity: {sf.severity}</div>
+        </div>
+        <div className="flex gap-1.5">
+          <label className="flex items-center gap-1 text-[10px] cursor-pointer px-2 py-1 rounded" style={{background: isChecked ? B.green : "white", color: isChecked ? "white" : B.t2}}>
+            <input type="checkbox" checked={isChecked} onChange={() => toggleChecked(sf.id)} className="hidden"/>
+            ✓ Проверено
+          </label>
+          <label className="flex items-center gap-1 text-[10px] cursor-pointer px-2 py-1 rounded" style={{background: isFlagged ? B.red : "white", color: isFlagged ? "white" : B.t2}}>
+            <input type="checkbox" checked={isFlagged} onChange={() => toggleFlagged(sf.id)} className="hidden"/>
+            ⚠ Выявлено
+          </label>
+        </div>
+      </div>;
+    })}
+    {formData.stopFactorsFlagged.length > 0 && <div className="p-3 rounded-lg sticky bottom-0" style={{background: B.redL, border: `2px solid ${B.red}`}}>
+      <div className="font-bold" style={{color: B.red}}>⚠ Выявлено стоп-факторов: {formData.stopFactorsFlagged.length}</div>
+      <div className="text-[10px] mt-1" style={{color: B.t2}}>
+        Применение упрощённой формы анкеты невозможно. Регистрация требует расширенной проверки и одобрения комплаенс.
+      </div>
+    </div>}
+  </div>;
+}
+
+// ═══ Step 6: Documents upload ═══
+function OnboardingStep6({formData, update, setToast}) {
+  const requiredDocs = [
+    {key: "ustav", label: "Устав ЮЛ", required: true},
+    {key: "regCertificate", label: "Свидетельство о регистрации", required: true},
+    {key: "directorPassport", label: "Паспорт руководителя", required: true},
+    {key: "accountantPassport", label: "Паспорт главбуха", required: false},
+    {key: "authorizationOrder", label: "Приказ о назначении / доверенность", required: false},
+    {key: "beneficiariesList", label: "Список бенефициаров", required: formData.beneficiaries.length > 1},
+    {key: "financialStatement", label: "Финансовая отчётность (баланс, ОПУ)", required: false},
+  ];
+
+  const handleUpload = (key) => {
+    // Mock upload — в production это реальный file upload
+    update({documents: {...formData.documents, [key]: {
+      name: `${key}_${Date.now()}.pdf`,
+      size: Math.floor(Math.random() * 500 + 100) + " KB",
+      uploadedAt: new Date().toISOString(),
+    }}});
+    setToast && setToast({msg: "Документ загружен (mock)", type: "success"});
+  };
+
+  return <div className="space-y-2 text-xs">
+    <div className="text-[10px] mb-3" style={{color: B.t3}}>
+      Загрузите регистрационные документы. Платформа автоматически проверит формат и применит политики хранения (10 лет, БК РБ ст.121).
+    </div>
+    {requiredDocs.map(d => {
+      const doc = formData.documents[d.key];
+      return <div key={d.key} className="flex items-center justify-between gap-2 p-2 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium" style={{color: B.t1}}>
+            {d.label}
+            {d.required && <span className="ml-1 text-red-500">*</span>}
+          </div>
+          {doc && <div className="text-[10px] mono" style={{color: B.green}}>✓ {doc.name} ({doc.size})</div>}
+        </div>
+        <Btn size="sm" variant={doc ? "ghost" : "secondary"} onClick={() => handleUpload(d.key)}>
+          {doc ? "Заменить" : "Загрузить"}
+        </Btn>
+      </div>;
+    })}
+  </div>;
+}
+
+// ═══ Step 7: Consents ═══
+function OnboardingStep7({formData, update}) {
+  const updateConsent = (key, value) => update({consents: {...formData.consents, [key]: value}});
+
+  const consentItems = [
+    {key: "pdn_processing", title: "Согласие на обработку персональных данных", required: true,
+     legalBasis: "Закон №99-З от 7.05.2021",
+     text: "Я даю согласие на обработку моих персональных данных в целях заключения и исполнения договора факторинга, оценки кредитоспособности (скоринг), передачи в Кредитный регистр и Легат, соблюдения AML/KYC требований."},
+    {key: "kr_inquiry", title: "Согласие на запрос отчёта в Кредитный регистр НБРБ", required: true,
+     legalBasis: "Закон о Кредитном регистре",
+     text: "Я даю согласие на получение моей кредитной истории из Кредитного регистра НБРБ для оценки платёжеспособности."},
+    {key: "legat_inquiry", title: "Согласие на проверку в Легате", required: false,
+     legalBasis: "Регламент НЦЭУ",
+     text: "Я даю согласие на получение информации о судебных делах в системе Легат для оценки рисков."},
+    {key: "marketing", title: "Согласие на маркетинговые рассылки", required: false,
+     legalBasis: "Закон 99-З",
+     text: "Я даю согласие на рассылку информации о новых продуктах и услугах."},
+  ];
+
+  return <div className="space-y-3 text-xs max-h-[400px] overflow-y-auto">
+    <div className="p-2.5 rounded-lg" style={{background: "#EEF2FF", color: "#6366F1"}}>
+      🛡️ <strong>Согласия подписываются ЭЦП клиента (ГосСУОК).</strong> Каждое согласие — отдельная запись в реестре с правом отзыва.
+    </div>
+
+    {consentItems.map(c => {
+      const isChecked = formData.consents[c.key];
+      return <div key={c.key} className="p-3 rounded-lg" style={{background: isChecked ? B.greenL : "#F8FAFC", border: `1px solid ${isChecked ? B.green + "40" : B.border}`}}>
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" checked={isChecked} onChange={e => updateConsent(c.key, e.target.checked)} className="mt-0.5"/>
+          <div className="flex-1 min-w-0">
+            <div className="font-semibold flex items-center gap-2" style={{color: B.t1}}>
+              {c.title}
+              {c.required && <span className="text-red-500">*</span>}
+            </div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t3}}>📚 {c.legalBasis}</div>
+            <div className="text-[10px] mt-1.5" style={{color: B.t2}}>{c.text}</div>
+          </div>
+        </label>
+      </div>;
+    })}
+  </div>;
+}
+
+// ═══ Step 8: Confirmation ═══
+function OnboardingStep8({formData, update, canUseSimpleForm}) {
+  const eligibility = canUseSimpleForm();
+  const finalFormType = eligibility.eligible ? formData.formType : "extended";
+  const willBeChanged = formData.formType === "simple" && !eligibility.eligible;
+
+  return <div className="space-y-3 text-xs max-h-[400px] overflow-y-auto">
+    <div className="text-[10px]" style={{color: B.t3}}>
+      Проверьте сводку. После регистрации заявка отправляется на верификацию аналитика банка.
+    </div>
+
+    {willBeChanged && <div className="p-3 rounded-lg" style={{background: B.yellowL, border: `2px solid ${B.yellow}`}}>
+      <div className="font-bold" style={{color: B.yellow}}>⚠ Форма будет изменена на расширенную</div>
+      <div className="text-[10px] mt-1" style={{color: B.t2}}>
+        Вы выбрали упрощённую форму, но условия не выполняются:
+        {!eligibility.allRBResidents && <div>• Не все стороны — резиденты РБ</div>}
+        {!eligibility.simpleStructure && <div>• Сложная структура учредителей</div>}
+        {!eligibility.noStopFactors && <div>• Выявлены стоп-факторы</div>}
+      </div>
+    </div>}
+
+    <Card className="p-3">
+      <div className="font-semibold mb-2" style={{color: B.t1}}>Основные данные</div>
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div><span style={{color: B.t3}}>Название:</span> <strong style={{color: B.t1}}>{formData.name || "—"}</strong></div>
+        <div><span style={{color: B.t3}}>УНП:</span> <strong className="mono" style={{color: B.t1}}>{formData.unp || "—"}</strong></div>
+        <div><span style={{color: B.t3}}>Дата рег.:</span> <strong style={{color: B.t1}}>{formData.regDate || "—"}</strong></div>
+        <div><span style={{color: B.t3}}>ОКЭД:</span> <strong className="mono" style={{color: B.t1}}>{formData.mainOked || "—"}</strong></div>
+        <div className="col-span-2"><span style={{color: B.t3}}>Адрес:</span> <strong style={{color: B.t1}}>{formData.legalAddress || "—"}</strong></div>
+      </div>
+    </Card>
+
+    <Card className="p-3">
+      <div className="font-semibold mb-2" style={{color: B.t1}}>Compliance результат</div>
+      <div className="space-y-1 text-[11px]">
+        <div className="flex justify-between"><span style={{color: B.t3}}>Форма анкеты:</span>
+          <strong style={{color: finalFormType === "simple" ? B.green : B.accent}}>
+            {finalFormType === "simple" ? "Упрощённая" : "Расширенная"}
+          </strong>
+        </div>
+        <div className="flex justify-between"><span style={{color: B.t3}}>Стоп-факторов проверено:</span>
+          <strong style={{color: B.t1}}>{formData.stopFactorsChecked.length} из {STOP_FACTORS.length}</strong>
+        </div>
+        <div className="flex justify-between"><span style={{color: B.t3}}>Стоп-факторов выявлено:</span>
+          <strong style={{color: formData.stopFactorsFlagged.length > 0 ? B.red : B.green}}>
+            {formData.stopFactorsFlagged.length}
+          </strong>
+        </div>
+        <div className="flex justify-between"><span style={{color: B.t3}}>Бенефициаров:</span>
+          <strong style={{color: B.t1}}>{formData.beneficiaries.length}</strong>
+        </div>
+        <div className="flex justify-between"><span style={{color: B.t3}}>Документов загружено:</span>
+          <strong style={{color: B.t1}}>{Object.values(formData.documents).filter(Boolean).length}</strong>
+        </div>
+        <div className="flex justify-between"><span style={{color: B.t3}}>Согласий подписано:</span>
+          <strong style={{color: B.t1}}>{Object.values(formData.consents).filter(Boolean).length} из 4</strong>
+        </div>
+      </div>
+    </Card>
+
+    <label className="flex items-start gap-2 p-3 rounded-lg cursor-pointer" style={{background: "#EEF2FF", border: `2px solid ${formData.confirmed ? "#6366F1" : B.border}`}}>
+      <input type="checkbox" checked={formData.confirmed} onChange={e => update({confirmed: e.target.checked})} className="mt-0.5"/>
+      <div className="text-[11px]" style={{color: B.t1}}>
+        Подтверждаю достоверность всех введённых данных. Понимаю, что подача недостоверных данных может являться основанием для отказа в обслуживании и привлечения к ответственности согласно Закону 165-З.
+      </div>
+    </label>
   </div>;
 }
 
 function ClientDetailView({client, onBack, setToast}) {
   const [limitModal, setLimitModal] = useState(false);
   const [blockDangerModal, setBlockDangerModal] = useState(false);
+  const [krModalOpen, setKrModalOpen] = useState(false);
+  const [legatModalOpen, setLegatModalOpen] = useState(false);
   const [rateModal, setRateModal] = useState(false);
   const [newLimit, setNewLimit] = useState(client.limit||0);
   const [newRate, setNewRate] = useState(client.rate||25);
@@ -10720,6 +12483,176 @@ function ClientDetailView({client, onBack, setToast}) {
           })()}
         </Card>
 
+        {/* ═══ КРЕДИТНОЕ ДОСЬЕ (COMPLIANCE) ═══ */}
+        <Card className="p-5">
+          <div className="flex items-start justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-bold flex items-center gap-2" style={{color: B.t1}}>
+                <span>📁</span>
+                Кредитное досье
+              </h3>
+              <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                Структурированный набор документов и данных по сделке (БК РБ + НБРБ №34)
+              </div>
+            </div>
+            <span className="text-[9px] px-2 py-0.5 rounded" style={{background: "#EEF2FF", color: "#6366F1"}}>
+              Compliance · 99-З · 113-З о факторинге
+            </span>
+          </div>
+
+          {(() => {
+            const compliance = getCompanyCompliance(client);
+            const externalReports = getCompanyExternalReports(client);
+            const consents = getClientConsents(client.id);
+
+            return <div className="space-y-4">
+              {/* === Tab: Идентификация / онбординг === */}
+              <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>1. Идентификация (онбординг)</div>
+                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold"
+                    style={{background: compliance.formType === "simple" ? B.greenL : "#FEF3C7", color: compliance.formType === "simple" ? B.green : B.yellow}}>
+                    {compliance.formType === "simple" ? "Упрощённая форма" : "Расширенная форма"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div>
+                    <span style={{color: B.t3}}>Метод:</span>{" "}
+                    <strong style={{color: B.t1}}>
+                      {compliance.onboardingMethod === "msi" ? "🔐 МСИ (НБРБ)"
+                        : compliance.onboardingMethod === "agent" ? "🤝 Через агента"
+                        : "🌐 Удалённая"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span style={{color: B.t3}}>Дата:</span>{" "}
+                    <strong style={{color: B.t1}}>{compliance.onboardingDate}</strong>
+                  </div>
+                  <div>
+                    <span style={{color: B.t3}}>Оператор:</span>{" "}
+                    <strong style={{color: B.t1}}>{compliance.onboardingOperator}</strong>
+                  </div>
+                  <div>
+                    <span style={{color: B.t3}}>Резидентство:</span>{" "}
+                    <strong style={{color: compliance.residencyStatus === "RB_resident" ? B.green : B.yellow}}>
+                      {compliance.residencyStatus === "RB_resident" ? "✓ Резидент РБ" : "⚠ Не резидент"}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* === Tab: Стоп-факторы === */}
+              <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>2. Стоп-факторы (AML/KYC)</div>
+                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold"
+                    style={{background: compliance.stopFactors.flagged.length > 0 ? B.redL : B.greenL,
+                      color: compliance.stopFactors.flagged.length > 0 ? B.red : B.green}}>
+                    {compliance.stopFactors.flagged.length > 0
+                      ? `⚠ Выявлено: ${compliance.stopFactors.flagged.length}`
+                      : `✓ Не выявлено`}
+                  </span>
+                </div>
+                <div className="text-[11px]" style={{color: B.t2}}>
+                  Проверено факторов: <strong>{compliance.stopFactors.checked.length}/{STOP_FACTORS.length}</strong>
+                  {" · "}
+                  <span style={{color: B.t3}}>Последняя проверка: {compliance.stopFactors.lastChecked}</span>
+                </div>
+                {compliance.stopFactors.flagged.length > 0 && <div className="mt-2 p-2 rounded text-[10px]" style={{background: B.redL, color: B.red}}>
+                  <strong>Выявленные стоп-факторы:</strong>
+                  <ul className="list-disc ml-4 mt-1">
+                    {compliance.stopFactors.flagged.map(id => {
+                      const f = STOP_FACTORS.find(sf => sf.id === id);
+                      return f ? <li key={id}>{f.label}</li> : null;
+                    })}
+                  </ul>
+                </div>}
+              </div>
+
+              {/* === Tab: Согласия (ПДн) === */}
+              <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>3. Согласия на обработку ПДн (Закон 99-З)</div>
+                </div>
+                <div className="space-y-1.5">
+                  {consents.length > 0 ? consents.map(c => <div key={c.id} className="flex items-center justify-between p-2 rounded" style={{background: c.signed ? "white" : "#FEF3C7"}}>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span style={{color: c.signed ? B.green : B.yellow, fontSize: 12}}>
+                        {c.signed ? "✓" : "○"}
+                      </span>
+                      <span className="text-[11px] truncate" style={{color: B.t1}}>
+                        {c.title || c.type}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {c.signed && <span className="text-[9px] mono" style={{color: B.t3}}>{c.signedDate}</span>}
+                      {c.signed && c.signedMethod === "ECP_GOSSUOK" && <span className="text-[9px] px-1 rounded" style={{background: B.accentL, color: B.accent}}>🔐 ЭЦП</span>}
+                    </div>
+                  </div>) : <div className="text-[10px] py-2 text-center" style={{color: B.t3}}>Нет согласий</div>}
+                </div>
+              </div>
+
+              {/* === Tab: Внешние отчёты (КР + Легат) === */}
+              <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>4. Внешние отчёты (КР + Легат)</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {/* KR card */}
+                  <button onClick={() => setKrModalOpen(true)}
+                    className="p-2.5 rounded-lg text-left hover:shadow-sm transition-all" style={{background: "white", border: `1px solid ${B.border}`}}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: "#6366F1"}}>📊 Кред. Регистр</span>
+                      {externalReports.kr && !isReportExpired(externalReports.kr) ?
+                        <span className="text-[9px] px-1 rounded" style={{background: B.greenL, color: B.green}}>✓ Актуален</span>
+                        : <span className="text-[9px] px-1 rounded" style={{background: B.yellowL, color: B.yellow}}>⚠ Истёк</span>}
+                    </div>
+                    <div className="text-[10px]" style={{color: B.t2}}>
+                      Получен: {externalReports.kr?.lastReportDate || "—"}
+                    </div>
+                    <div className="text-[10px]" style={{color: B.t3}}>
+                      Действителен до: {externalReports.kr?.validUntil || "—"}
+                    </div>
+                  </button>
+
+                  {/* Legat card */}
+                  <button onClick={() => setLegatModalOpen(true)}
+                    className="p-2.5 rounded-lg text-left hover:shadow-sm transition-all" style={{background: "white", border: `1px solid ${B.border}`}}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: "#7C3AED"}}>⚖️ Легат</span>
+                      {externalReports.legat && !isReportExpired(externalReports.legat) ?
+                        <span className="text-[9px] px-1 rounded" style={{background: B.greenL, color: B.green}}>✓ Актуален</span>
+                        : <span className="text-[9px] px-1 rounded" style={{background: B.yellowL, color: B.yellow}}>⚠ Истёк</span>}
+                    </div>
+                    <div className="text-[10px]" style={{color: B.t2}}>
+                      Получен: {externalReports.legat?.lastReportDate || "—"}
+                    </div>
+                    <div className="text-[10px]" style={{color: B.t3}}>
+                      Действителен до: {externalReports.legat?.validUntil || "—"}
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* === Tab: Бенефициары === */}
+              {compliance.beneficiaries && compliance.beneficiaries.length > 0 && <div className="p-3 rounded-xl" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>5. Бенефициарные владельцы</div>
+                </div>
+                <div className="space-y-1">
+                  {compliance.beneficiaries.map((b, i) => <div key={i} className="flex items-center justify-between text-[11px] p-1.5">
+                    <div>
+                      <strong style={{color: B.t1}}>{b.fio}</strong>
+                      {b.isPdl && <span className="ml-2 px-1 py-0.5 rounded text-[9px]" style={{background: B.redL, color: B.red}}>⚠ ПДЛ</span>}
+                    </div>
+                    <div style={{color: B.t2}}>{b.share}%</div>
+                  </div>)}
+                </div>
+              </div>}
+            </div>;
+          })()}
+        </Card>
+
         {/* Related companies */}
         <Card className="p-5">
           <h3 className="text-sm font-bold mb-3" style={{color:B.t1}}>Связи: {client.role==="creditor"?"покупатели":"поставщики"}</h3>
@@ -10824,6 +12757,124 @@ function ClientDetailView({client, onBack, setToast}) {
       accent={B.red}
       icon={Lock}
     />
+
+    {/* === Credit Registry Report Modal === */}
+    <Modal open={krModalOpen} onClose={() => setKrModalOpen(false)} title={`Отчёт Кредитного регистра НБРБ — ${client.name}`}>
+      {(() => {
+        const report = fetchCreditRegistryReport(client.unp);
+        if (!report) return <div className="text-center py-8" style={{color: B.t3}}>
+          <Inbox size={32} className="mx-auto mb-2" style={{color: B.t3}}/>
+          <div className="text-sm">Отчёт ещё не запрашивался</div>
+          <Btn className="mt-3" onClick={() => setToast && setToast({msg: "Запрос отправлен в КР НБРБ (mock)", type: "success"})}>
+            Запросить отчёт КР
+          </Btn>
+        </div>;
+        return <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 p-3 rounded-lg text-[11px]" style={{background: "#F8FAFC"}}>
+            <div><span style={{color: B.t3}}>ID запроса:</span>{" "}<strong className="mono">{report.request.requestId}</strong></div>
+            <div><span style={{color: B.t3}}>Дата:</span>{" "}<strong>{report.request.requestDate}</strong></div>
+            <div><span style={{color: B.t3}}>УНП:</span>{" "}<strong className="mono">{report.request.unp}</strong></div>
+            <div><span style={{color: B.t3}}>Действителен до:</span>{" "}<strong>{report.validUntil}</strong></div>
+          </div>
+
+          <div className="p-3 rounded-lg" style={{background: "#EEF2FF"}}>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: "#6366F1"}}>Сводная информация</div>
+            <div className="grid grid-cols-4 gap-2 text-[11px]">
+              <div><span style={{color: B.t3}}>Активных:</span> <strong>{report.summary.totalActive}</strong></div>
+              <div><span style={{color: B.t3}}>Закрытых:</span> <strong>{report.summary.totalClosed}</strong></div>
+              <div><span style={{color: B.t3}}>Просрочек:</span> <strong style={{color: report.summary.overdueRecords > 0 ? B.red : B.green}}>{report.summary.overdueRecords}</strong></div>
+              <div><span style={{color: B.t3}}>Макс. дней просрочки:</span> <strong>{report.summary.maxOverdueDays}</strong></div>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>Кредитная история</div>
+            <table className="w-full text-[11px]">
+              <thead><tr className="border-b" style={{borderColor: B.border}}>
+                <th className="text-left p-1.5" style={{color: B.t3}}>Кредитор</th>
+                <th className="text-left p-1.5" style={{color: B.t3}}>Тип</th>
+                <th className="text-right p-1.5" style={{color: B.t3}}>Сумма</th>
+                <th className="text-left p-1.5" style={{color: B.t3}}>Открыт</th>
+                <th className="text-center p-1.5" style={{color: B.t3}}>Статус</th>
+              </tr></thead>
+              <tbody>{report.creditHistory.map((c, i) => <tr key={i} className="border-b" style={{borderColor: B.border}}>
+                <td className="p-1.5" style={{color: B.t1}}>{c.creditor}</td>
+                <td className="p-1.5" style={{color: B.t2}}>{c.type}</td>
+                <td className="p-1.5 text-right mono" style={{color: B.t1}}>{fmtByn(c.amount)}</td>
+                <td className="p-1.5 mono" style={{color: B.t2}}>{c.openDate}</td>
+                <td className="p-1.5 text-center">
+                  {c.status === "closed_on_time" ? <span className="px-1 py-0.5 rounded text-[9px]" style={{background: B.greenL, color: B.green}}>Закрыт ОК</span>
+                    : c.status === "active" ? <span className="px-1 py-0.5 rounded text-[9px]" style={{background: B.accentL, color: B.accent}}>Активен</span>
+                    : c.status}
+                </td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+
+          <div className="p-2 rounded-lg text-[10px]" style={{background: "#FEF3C7", color: B.yellow}}>
+            ⚠ В прототипе используется mock-данные. В production — интеграция с КР НБРБ через защищённый канал (договор + сертификация).
+          </div>
+        </div>;
+      })()}
+    </Modal>
+
+    {/* === Legat Modal === */}
+    <Modal open={legatModalOpen} onClose={() => setLegatModalOpen(false)} title={`Отчёт Легата (Минюст РБ) — ${client.name}`}>
+      {(() => {
+        const report = fetchLegatReport(client.unp);
+        if (!report) return <div className="text-center py-8" style={{color: B.t3}}>
+          <Inbox size={32} className="mx-auto mb-2"/>
+          <div className="text-sm">Отчёт ещё не запрашивался</div>
+          <Btn className="mt-3" onClick={() => setToast && setToast({msg: "Запрос отправлен в Легат (mock)", type: "success"})}>
+            Проверить в Легате
+          </Btn>
+        </div>;
+        return <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 p-3 rounded-lg text-[11px]" style={{background: "#F8FAFC"}}>
+            <div><span style={{color: B.t3}}>ID запроса:</span>{" "}<strong className="mono">{report.request.requestId}</strong></div>
+            <div><span style={{color: B.t3}}>Дата:</span>{" "}<strong>{report.request.requestDate}</strong></div>
+            <div><span style={{color: B.t3}}>УНП:</span>{" "}<strong className="mono">{report.request.unp}</strong></div>
+            <div><span style={{color: B.t3}}>Действителен до:</span>{" "}<strong>{report.validUntil}</strong></div>
+          </div>
+
+          <div className="p-3 rounded-lg" style={{background: "#F3E8FF"}}>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: "#7C3AED"}}>Сводная информация</div>
+            <div className="grid grid-cols-4 gap-2 text-[11px]">
+              <div><span style={{color: B.t3}}>Всего дел:</span> <strong>{report.summary.totalCases}</strong></div>
+              <div><span style={{color: B.t3}}>Как ответчик:</span> <strong style={{color: report.summary.asDefendant > 0 ? B.yellow : B.green}}>{report.summary.asDefendant}</strong></div>
+              <div><span style={{color: B.t3}}>Как истец:</span> <strong>{report.summary.asPlaintiff}</strong></div>
+              <div><span style={{color: B.t3}}>Открытые:</span> <strong style={{color: report.summary.openCases > 0 ? B.red : B.green}}>{report.summary.openCases}</strong></div>
+            </div>
+          </div>
+
+          {report.courtCases.length > 0 ? <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>Судебные дела</div>
+            <div className="space-y-2">{report.courtCases.map((c, i) => <div key={i} className="p-2 rounded border" style={{borderColor: B.border}}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[11px] font-bold mono" style={{color: B.t1}}>{c.caseId}</span>
+                <span className="px-1.5 py-0.5 rounded text-[9px]" style={{background: c.status === "closed" ? B.greenL : B.redL, color: c.status === "closed" ? B.green : B.red}}>
+                  {c.status === "closed" ? "Закрыто" : "Открыто"}
+                </span>
+              </div>
+              <div className="text-[10px]" style={{color: B.t2}}>
+                <div>Суд: {c.court}</div>
+                <div>Истец: {c.plaintiff}</div>
+                <div>Ответчик: {c.defendant}</div>
+                <div>Предмет: {c.subject}</div>
+                <div>Сумма: <strong className="mono" style={{color: B.t1}}>{fmtByn(c.amount)}</strong></div>
+                {c.outcome && <div>Исход: {c.outcome === "settled" ? "Урегулировано" : c.outcome}</div>}
+              </div>
+            </div>)}</div>
+          </div> : <div className="p-4 rounded text-center text-[11px]" style={{background: B.greenL, color: B.green}}>
+            ✓ Судебных дел не выявлено
+          </div>}
+
+          <div className="p-2 rounded-lg text-[10px]" style={{background: "#FEF3C7", color: B.yellow}}>
+            ⚠ В прототипе используются mock-данные. В production — интеграция с Легатом (Минюст РБ через НЦЭУ).
+          </div>
+        </div>;
+      })()}
+    </Modal>
   </div>;
 }
 
@@ -11152,6 +13203,39 @@ function OverduePage({pushNav, setToast}) {
           {key: "reserveByn", label: "Резерв BYN", formatter: d => Math.round(d.amount * getReservePercent(Math.abs(d.daysLeft)) / 100)},
         ]}
         rows={overdueDeals}/>}/>
+
+    {/* Debtor-overdue + defaulted banner */}
+    {(() => {
+      const debtorOverdue = ASSIGNMENTS.filter(a => a.stage === "debtor_overdue");
+      const debtorDefaulted = ASSIGNMENTS.filter(a => a.stage === "debtor_defaulted");
+      if (debtorOverdue.length === 0 && debtorDefaulted.length === 0) return null;
+      const totalAmount = [...debtorOverdue, ...debtorDefaulted].reduce((s, a) => s + (a.amount || 0), 0);
+      return <Card className="p-4 mb-5" style={{background: B.redL, borderLeft: `4px solid ${B.red}`}}>
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{background: "white"}}>
+              <AlertTriangle size={20} style={{color: B.red}} className="animate-pulse"/>
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-bold uppercase tracking-wider" style={{color: B.red}}>
+                Неплатящие должники — фаза recover
+              </div>
+              <div className="text-sm font-black mt-1" style={{color: B.t1}}>
+                {debtorOverdue.length} в просрочке + {debtorDefaulted.length} в юр.отделе = <span className="mono">{fmtByn(totalAmount)}</span> риска
+              </div>
+              <div className="text-[10px] mt-1" style={{color: B.t2}}>
+                Кредитные менеджеры работают с просрочкой. Если >14 дней — передача юр.отделу и судебное взыскание.
+              </div>
+            </div>
+          </div>
+          <Btn size="sm" variant="secondary" icon={ArrowRight} onClick={() => {
+            if (typeof window !== "undefined") window.location.hash = "#/assignments";
+          }}>
+            К уступкам
+          </Btn>
+        </div>
+      </Card>;
+    })()}
 
     {/* Reserve scale visual */}
     <Card className="p-5 mb-6">
