@@ -820,7 +820,7 @@ const ASSIGNMENTS = [
    ]},
 
   // ═══ Debtor OVERDUE — просрочка возврата (critical) ═══
-  {id:"ASG-008", dealId:"REQ-005", creditorId:3, debtorId:4, amount:38000, discount:2356, toReceive:35644,
+  {id:"ASG-008", dealId:"REQ-005", creditorId:1, debtorId:4, amount:38000, discount:2356, toReceive:35644,
    stage:"debtor_overdue", stageStartDate:"2026-03-21", createdDate:"2026-01-15", shippingDate:"2026-01-10",
    ttnNumber:"ТТН-42",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-01-17",
@@ -843,7 +843,7 @@ const ASSIGNMENTS = [
    ]},
 
   // ═══ Debtor DEFAULTED — передано юр.отделу (critical) ═══
-  {id:"ASG-009", dealId:"REQ-003", creditorId:5, debtorId:6, amount:120000, discount:7440, toReceive:112560,
+  {id:"ASG-009", dealId:"REQ-003", creditorId:1, debtorId:6, amount:120000, discount:7440, toReceive:112560,
    stage:"debtor_defaulted", stageStartDate:"2026-02-15", createdDate:"2025-10-10", shippingDate:"2025-10-05",
    ttnNumber:"ТТН-28",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2025-10-12",
