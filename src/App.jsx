@@ -3693,6 +3693,33 @@ function getMyAssignmentStages(user) {
   return access.assignmentStages;
 }
 
+// Get the next stages (after current) that user will need to act on, with friendly names
+function getMyUpcomingStages(user, currentStageId) {
+  const access = ROLE_ACCESS[user.role];
+  if (!access?.assignmentStages) return [];
+  const currentIdx = ASSIGNMENT_STAGES.findIndex(s => s.id === currentStageId);
+  if (currentIdx === -1) return [];
+  const myStages = access.assignmentStages === "all"
+    ? ASSIGNMENT_STAGES.filter(s => s.actor === "bank").map(s => s.id)
+    : access.assignmentStages;
+  return ASSIGNMENT_STAGES
+    .slice(currentIdx + 1)
+    .filter(s => myStages.includes(s.id))
+    .map(s => ({...s, isMyStage: true}));
+}
+
+// Get who will act on the very next stage (regardless of role)
+function getNextStageAfter(currentStageId) {
+  const idx = ASSIGNMENT_STAGES.findIndex(s => s.id === currentStageId);
+  if (idx === -1 || idx >= ASSIGNMENT_STAGES.length - 1) return null;
+  return ASSIGNMENT_STAGES[idx + 1];
+}
+
+// Was current user already involved in this assignment (history)?
+function wasUserInvolvedInAssignment(asg, user) {
+  return (asg.history || []).some(h => h.userRole === user.role || h.user === user.name);
+}
+
 function calcSlaDays(created) {
   const c = new Date(created);
   const now = new Date("2026-03-26");
@@ -8764,7 +8791,169 @@ function AssignmentWorkflow({asg}) {
 }
 
 // Client activity card (shows who's holding the assignment)
-function ClientActivityCard({asg}) {
+// ═══════════════════════════════════════
+// STAGE MONITORING CARD
+// ═══════════════════════════════════════
+// Показывается когда на этапе работает другой банковский сотрудник
+// и текущий пользователь не может действовать. Не "пустой", а полноценный
+// мониторинг: что происходит, SLA, что я делал/буду делать, действия для эскалации.
+// ═══════════════════════════════════════
+function StageMonitoringCard({asg, currentUser, setToast}) {
+  const stage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
+  const worker = BANK_USERS.find(u => u.role === stage?.role);
+  const slaInfo = getAssignmentSlaInfo(asg);
+  const isOverdue = slaInfo.overdue;
+  const slaPercent = slaInfo.limit > 0 ? Math.min(100, (slaInfo.days / slaInfo.limit) * 100) : 0;
+
+  // What user did before in this assignment
+  const myPreviousActions = (asg.history || []).filter(h => h.userRole === currentUser.role);
+
+  // What user will do next in this assignment
+  const myUpcomingStages = getMyUpcomingStages(currentUser, asg.stage);
+  const myNextStage = myUpcomingStages[0] || null;
+  const wasInvolved = wasUserInvolvedInAssignment(asg, currentUser);
+
+  // Visual state
+  const cardBorderColor = isOverdue ? B.red + "40" : "#E2E8F0";
+  const slaColor = slaPercent >= 100 ? B.red : slaPercent >= 75 ? B.yellow : B.green;
+
+  // ─── Determine context message based on user history with this assignment ───
+  let contextMessage;
+  let contextColor;
+  if (wasInvolved && myNextStage) {
+    contextMessage = `Вы вели эту уступку на этапе «${(asg.history.find(h => h.userRole === currentUser.role)?.action) || "ранее"}». Дальше вам снова нужно будет действовать на этапе «${myNextStage.label}».`;
+    contextColor = B.t2;
+  } else if (wasInvolved && !myNextStage) {
+    contextMessage = "Вы вели эту уступку ранее. Сейчас она в работе у других — действий от вас больше не потребуется.";
+    contextColor = B.t3;
+  } else if (!wasInvolved && myNextStage) {
+    contextMessage = `Вы пока не работали с этой уступкой. Скоро она дойдёт до вас на этапе «${myNextStage.label}».`;
+    contextColor = B.t2;
+  } else {
+    contextMessage = "Просмотр уступки в режиме мониторинга — ваша роль в этом workflow не задействована.";
+    contextColor = B.t3;
+  }
+
+  // Only show "Нудж" button if waiting > 1 day and current actor is bank role
+  const canNudge = slaInfo.days >= 1 && stage?.actor === "bank" && worker;
+
+  // Format previous actions human-readable
+  const formatAction = (h) => {
+    const label = AUDIT_ACTION_LABELS[h.action] || h.action;
+    return `${h.date?.split(" ")[0] || "—"} — ${label}`;
+  };
+
+  return <Card className="p-5 mb-5" style={{background: "white", borderColor: cardBorderColor, borderWidth: 1}}>
+    {/* === Top row: status + SLA === */}
+    <div className="flex items-start justify-between gap-3 mb-4">
+      <div className="flex items-start gap-3 min-w-0 flex-1">
+        <div className="w-12 h-12 rounded-full flex items-center justify-center shrink-0"
+          style={{background: stage?.color + "10" || "#F1F5F9", border: `2px solid ${stage?.color || B.t3}`}}>
+          <span className="text-xl">{stage?.actor === "bank" ? "🏦" : stage?.actor === "supplier" ? "👤" : stage?.actor === "debtor" ? "🚚" : "⚙"}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-wider mb-0.5" style={{color: B.t3}}>
+            Сейчас в работе
+          </div>
+          <div className="text-base font-bold" style={{color: B.t1}}>«{stage?.label || asg.stage}»</div>
+          {worker ? <div className="text-xs mt-1.5 flex items-center gap-1.5" style={{color: B.t2}}>
+            Ответственный:
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{background: ROLE_ACCESS[worker.role]?.color + "15", color: ROLE_ACCESS[worker.role]?.color}}>
+              {ROLE_ACCESS[worker.role]?.icon} {worker.name}
+            </span>
+          </div> : <div className="text-xs mt-1.5" style={{color: B.t3}}>
+            {stage?.whoActs || "Этап обрабатывается автоматически"}
+          </div>}
+          {stage?.actionHint && <div className="text-[11px] mt-1.5 italic" style={{color: B.t3}}>
+            {stage.actionHint}
+          </div>}
+        </div>
+      </div>
+      {/* SLA badge — visual, prominent */}
+      {slaInfo.limit > 0 && <div className="text-right shrink-0">
+        <div className="text-[9px] uppercase font-bold tracking-wider" style={{color: B.t3}}>SLA на этапе</div>
+        <div className="text-base font-black mono" style={{color: slaColor}}>
+          {slaInfo.days}/{slaInfo.limit}д
+        </div>
+        {isOverdue && <div className="text-[9px] mt-0.5 font-bold" style={{color: B.red}}>
+          ⚠ ПРЕВЫШЕН на {slaInfo.days - slaInfo.limit}д
+        </div>}
+      </div>}
+    </div>
+
+    {/* === SLA progress bar === */}
+    {slaInfo.limit > 0 && <div className="mb-4">
+      <div className="h-1.5 rounded-full overflow-hidden" style={{background: "#F1F5F9"}}>
+        <div className="h-full transition-all" style={{
+          width: `${slaPercent}%`,
+          background: slaColor,
+        }}/>
+      </div>
+    </div>}
+
+    {/* === Two-column: my history + my next === */}
+    <div className="grid grid-cols-2 gap-3 mb-4">
+      {/* My previous actions */}
+      <div className="p-3 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-1" style={{color: B.t3}}>
+          <CheckCircle size={11} style={{color: B.green}}/>
+          Что я уже сделал
+        </div>
+        {myPreviousActions.length > 0 ? <div className="space-y-1.5">
+          {myPreviousActions.slice(-3).map((h, i) => <div key={i} className="text-[11px]" style={{color: B.t2}}>
+            <span className="mono" style={{color: B.t3}}>{h.date?.split(" ")[0]}</span>
+            {" "}— {AUDIT_ACTION_LABELS[h.action] || h.action}
+          </div>)}
+        </div> : <div className="text-[11px] italic" style={{color: B.t3}}>
+          Ваша роль в этом workflow ещё не была задействована
+        </div>}
+      </div>
+
+      {/* My next action */}
+      <div className="p-3 rounded-lg" style={{background: myNextStage ? "#EEF2FF" : "#F8FAFC", border: `1px solid ${myNextStage ? "#6366F1" + "30" : B.border}`}}>
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-1" style={{color: myNextStage ? "#6366F1" : B.t3}}>
+          <ArrowRight size={11}/>
+          Что я буду делать дальше
+        </div>
+        {myNextStage ? <div className="text-[11px]">
+          <div className="font-bold" style={{color: B.t1}}>«{myNextStage.label}»</div>
+          <div className="mt-1" style={{color: B.t2}}>{myNextStage.actionHint}</div>
+          {myUpcomingStages.length > 1 && <div className="mt-1.5 text-[10px]" style={{color: B.t3}}>
+            Затем ещё: {myUpcomingStages.slice(1).map(s => `«${s.label}»`).join(" → ")}
+          </div>}
+        </div> : <div className="text-[11px] italic" style={{color: B.t3}}>
+          Эта уступка завершит вашу работу с ней
+        </div>}
+      </div>
+    </div>
+
+    {/* === Action buttons === */}
+    <div className="flex gap-2 flex-wrap">
+      {canNudge && <Btn size="sm" variant={isOverdue ? "danger" : "ghost"} icon={isOverdue ? AlertTriangle : Bell}
+        onClick={() => setToast && setToast({
+          msg: `Напоминание отправлено: ${worker.name}`,
+          type: "success",
+        })}>
+        {isOverdue ? "Эскалировать" : "Напомнить"} {worker.name.split(" ")[0]}
+      </Btn>}
+      <Btn size="sm" variant="ghost" icon={Mail}
+        onClick={() => setToast && setToast({
+          msg: "Заметка добавлена в историю уступки",
+          type: "success",
+        })}>
+        Добавить заметку
+      </Btn>
+    </div>
+
+    {/* === Helper text === */}
+    <div className="mt-3 pt-3 border-t text-[10px] flex items-start gap-1.5" style={{borderColor: B.border, color: contextColor}}>
+      <Info size={11} className="shrink-0 mt-0.5"/>
+      <span>{contextMessage}</span>
+    </div>
+  </Card>;
+}
+
+function ClientActivityCard({asg, setToast}) {
   const stage = ASSIGNMENT_STAGES.find(s=>s.id===asg.stage);
   if (!stage || (stage.actor !== "debtor" && stage.actor !== "supplier")) return null;
   const isSupplier = stage.actor === "supplier";
@@ -8784,8 +8973,13 @@ function ClientActivityCard({asg}) {
     <div className="flex items-start gap-3">
       <Clock size={20} style={{color:levelCfg.color}} className="shrink-0 mt-0.5"/>
       <div className="flex-1 min-w-0">
-        <div className="text-xs font-bold uppercase tracking-wider mb-1" style={{color:levelCfg.color}}>Ожидание клиента · {levelCfg.label}</div>
+        <div className="text-xs font-bold uppercase tracking-wider mb-1" style={{color:levelCfg.color}}>
+          Ожидание {isSupplier ? "поставщика" : "должника"} · {levelCfg.label}
+        </div>
         <div className="text-sm font-bold" style={{color:B.t1}}>{isSupplier?"Поставщик":"Должник"}: {client?.name||"—"}</div>
+        <div className="text-[11px] mt-1" style={{color:B.t2}}>
+          Этап: <strong>«{stage.label}»</strong> · {stage.actionHint}
+        </div>
         <div className="mt-2 space-y-0.5">
           {activity?.notifiedAt && <div className="text-[11px]" style={{color:B.t2}}>📨 Уведомлён: {activity.notifiedAt}</div>}
           {activity?.lastOpenedAt
@@ -8795,8 +8989,14 @@ function ClientActivityCard({asg}) {
           <div className="text-[11px] font-semibold" style={{color:levelCfg.color}}>💤 Без активности: {days}д</div>
         </div>
         <div className="flex gap-2 mt-3">
-          <Btn size="sm" variant="ghost" className="flex-1">📧 Отправить напоминание</Btn>
-          {level === "critical" && <Btn size="sm" variant="danger" className="flex-1">⚙ Передать ответственному</Btn>}
+          <Btn size="sm" variant="ghost" className="flex-1"
+            onClick={() => setToast && setToast({msg: `Напоминание отправлено: ${client?.name}`, type: "success"})}>
+            📧 Отправить напоминание
+          </Btn>
+          {level === "critical" && <Btn size="sm" variant="danger" className="flex-1"
+            onClick={() => setToast && setToast({msg: "Уступка передана в работу credit_ops для эскалации", type: "warning"})}>
+            ⚙ Передать ответственному
+          </Btn>}
         </div>
       </div>
     </div>
@@ -8833,8 +9033,65 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
   let secondaryAction = null;
 
   // Final / non-actionable state
-  if (asg.stage === "paid") return null;
-  if (!canAct) return null;
+  // ─── Final / non-actionable states ───
+  // "paid" — деньги отправлены клиенту, ждём должника (НЕ должно быть actor-action)
+  if (asg.stage === "paid") {
+    return <Card className="p-5 mb-5" style={{background: B.greenL, borderColor: B.green + "40"}}>
+      <div className="flex items-start gap-3">
+        <CheckCircle size={22} style={{color: B.green}} className="shrink-0 mt-0.5"/>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-bold" style={{color: B.green}}>✓ Финансирование выплачено клиенту</div>
+          <div className="text-xs mt-1" style={{color: B.t2}}>
+            Сумма <strong>{fmtByn(asg.toReceive || 0)}</strong> отправлена в АБС на счёт поставщика. Удержан дисконт <strong>{fmtByn(asg.discount || 0)}</strong>.
+          </div>
+          <div className="text-[11px] mt-2 p-2 rounded" style={{background: "white", color: B.t2}}>
+            ⏳ <strong>Следующий шаг:</strong> Платформа автоматически переведёт уступку в режим ожидания оплаты от должника.
+          </div>
+        </div>
+      </div>
+    </Card>;
+  }
+
+  // Если юзер не actor на текущем этапе — показать мониторинг (StageMonitoringCard)
+  if (!canAct) {
+    // Для этапов где ждём supplier/debtor — отдельный компонент с трекингом активности клиента
+    if (stage?.actor === "debtor" || stage?.actor === "supplier") {
+      return <ClientActivityCard asg={asg} setToast={setToast}/>;
+    }
+    // Финальный успешный закрытый этап
+    if (asg.stage === "debtor_paid") {
+      const economics = calculateAssignmentEconomics({amount: asg.amount, rate: 25, termDays: DEFAULT_ASSIGNMENT_TERM_DAYS});
+      return <Card className="p-5 mb-5" style={{background: B.greenL, borderColor: B.green + "40", borderWidth: 1}}>
+        <div className="flex items-start gap-3">
+          <CheckCircle size={22} style={{color: B.green}} className="shrink-0 mt-0.5"/>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-bold" style={{color: B.green}}>💚 Уступка закрыта успешно</div>
+            <div className="text-xs mt-1" style={{color: B.t2}}>
+              Должник полностью погасил: <strong>{fmtByn(asg.amount || 0)}</strong>.
+              Уступка прошла полный цикл за {asg.debtorPaidDate && asg.createdDate ?
+                Math.floor((new Date(asg.debtorPaidDate) - new Date(asg.createdDate)) / 86400000) + " дн." : "—"}
+            </div>
+            <div className="grid grid-cols-3 gap-3 mt-3 text-[11px]">
+              <div className="p-2 rounded" style={{background: "white"}}>
+                <div style={{color: B.t3}}>Дисконт</div>
+                <div className="font-bold mono" style={{color: B.t1}}>{fmtByn(asg.discount || economics.discount)}</div>
+              </div>
+              <div className="p-2 rounded" style={{background: "white"}}>
+                <div style={{color: B.t3}}>Доход банка</div>
+                <div className="font-bold mono" style={{color: B.green}}>{fmtByn(asg.bankEarned || economics.bankIncome)}</div>
+              </div>
+              <div className="p-2 rounded" style={{background: "white"}}>
+                <div style={{color: B.t3}}>Закрыто</div>
+                <div className="font-bold mono" style={{color: B.t1}}>{asg.debtorPaidDate || "—"}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Card>;
+    }
+    // Стандартный мониторинг — для всех остальных bank-этапов где не я actor
+    return <StageMonitoringCard asg={asg} currentUser={currentUser} setToast={setToast}/>;
+  }
 
   const days = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(asg) : 0;
   const slaInfo = ASSIGNMENT_SLA_LIMITS[asg.stage] || {days: 5, actor: "bank"};
@@ -9539,7 +9796,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
     const worker = BANK_USERS.find(u=>u.role===stage?.role);
     // Show different banners based on stage type
     if (stage?.actor === "debtor" || stage?.actor === "supplier") {
-      return <ClientActivityCard asg={asg}/>;
+      return <ClientActivityCard asg={asg} setToast={setToast}/>;
     }
     if (asg.stage === "paid") {
       return <Card className="p-5 mb-5" style={{background:B.greenL, borderColor:B.green+"40"}}>
@@ -9552,16 +9809,37 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
         </div>
       </Card>;
     }
-    return <Card className="p-5 mb-5" style={{background:"#F8FAFC",borderColor:B.border}}>
-      <div className="flex items-start gap-3">
-        <Info size={22} style={{color:B.t2}} className="shrink-0 mt-0.5"/>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-bold" style={{color:B.t1}}>Уступка на этапе «{stage?.label}»</div>
-          {worker && <div className="text-xs mt-1" style={{color:B.t2}}>Работает: <strong>{worker.name}</strong> ({ROLE_ACCESS[worker.role]?.label})</div>}
-          <div className="text-xs mt-1" style={{color:B.t3}}>На этом этапе от вас действий не требуется.</div>
+    if (asg.stage === "debtor_paid") {
+      const economics = calculateAssignmentEconomics({amount: asg.amount, rate: 25, termDays: DEFAULT_ASSIGNMENT_TERM_DAYS});
+      return <Card className="p-5 mb-5" style={{background:B.greenL, borderColor:B.green+"40", borderWidth: 1}}>
+        <div className="flex items-start gap-3">
+          <CheckCircle size={22} style={{color:B.green}} className="shrink-0 mt-0.5"/>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-bold" style={{color:B.green}}>💚 Уступка закрыта успешно</div>
+            <div className="text-xs mt-1" style={{color:B.t2}}>
+              Должник полностью погасил: <strong>{fmtByn(asg.amount || 0)}</strong>.
+              Уступка прошла полный цикл за {asg.debtorPaidDate && asg.createdDate ?
+                Math.floor((new Date(asg.debtorPaidDate) - new Date(asg.createdDate)) / 86400000) + " дн." : "—"}
+            </div>
+            <div className="grid grid-cols-3 gap-3 mt-3 text-[11px]">
+              <div className="p-2 rounded" style={{background: "white"}}>
+                <div style={{color: B.t3}}>Дисконт</div>
+                <div className="font-bold mono" style={{color: B.t1}}>{fmtByn(asg.discount || economics.discount)}</div>
+              </div>
+              <div className="p-2 rounded" style={{background: "white"}}>
+                <div style={{color: B.t3}}>Доход банка</div>
+                <div className="font-bold mono" style={{color: B.green}}>{fmtByn(asg.bankEarned || economics.bankIncome)}</div>
+              </div>
+              <div className="p-2 rounded" style={{background: "white"}}>
+                <div style={{color: B.t3}}>Закрыто</div>
+                <div className="font-bold mono" style={{color: B.t1}}>{asg.debtorPaidDate || "—"}</div>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
-    </Card>;
+      </Card>;
+    }
+    return <StageMonitoringCard asg={asg} currentUser={currentUser} setToast={setToast}/>;
   }
 
   const roleInfo = ROLE_ACCESS[currentUser.role];
@@ -9833,11 +10111,8 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
         <span className="px-2 py-1 rounded-lg text-[10px] font-bold" style={{background:B.accentL, color:B.accent}}>{fmtByn(asg.amount)}</span>
       </div>}/>
 
-    {/* Unified task form — primary UI for actionable assignments */}
+    {/* Unified task form — handles all states: actor, non-actor monitoring, paid, debtor_paid */}
     <AssignmentTaskForm asg={asg} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>
-    {/* Fallback: old ActionBlock for edge cases (paid, no action user, etc) */}
-    {(!canActOnAssignmentStage(currentUser, asg.stage) || asg.stage === "paid") &&
-      <AssignmentActionBlock asg={asg} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>}
 
     {/* Client reminder — when waiting for supplier/debtor action */}
     {isAssignmentWaitingClient(asg) && asg.stage !== "paid" && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow+"40"}}>
