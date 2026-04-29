@@ -9650,47 +9650,6 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
                 <div className="text-[10px] font-medium leading-tight" style={{color: isActive ? color : B.t2}}>
                   {p.description}
                 </div>
-                {/* Top-3 assignments preview in this phase */}
-                {(() => {
-                  const phaseStageIds = ASSIGNMENT_STAGES.filter(s => s.phase === p.id).map(s => s.id);
-                  const phaseAssignments = activeAssignments.filter(a => phaseStageIds.includes(a.stage));
-                  if (phaseAssignments.length === 0) return null;
-                  // Сортировка: просрочки первыми, потом по дням desc
-                  const sorted = [...phaseAssignments].sort((a, b) => {
-                    const aLim = ASSIGNMENT_SLA_LIMITS[a.stage];
-                    const bLim = ASSIGNMENT_SLA_LIMITS[b.stage];
-                    const aDays = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(a) : 0;
-                    const bDays = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(b) : 0;
-                    const aOver = aLim && aLim.days > 0 && aDays > aLim.days;
-                    const bOver = bLim && bLim.days > 0 && bDays > bLim.days;
-                    if (aOver && !bOver) return -1;
-                    if (!aOver && bOver) return 1;
-                    return bDays - aDays;
-                  });
-                  const top3 = sorted.slice(0, 3);
-                  return <div className="pt-1 border-t border-dashed space-y-0.5" style={{borderColor: B.border}}>
-                    <div className="text-[9px] font-bold" style={{color: B.t3}}>Уступки в этой фазе:</div>
-                    {top3.map(asg => {
-                      const aStage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
-                      const aLim = ASSIGNMENT_SLA_LIMITS[asg.stage];
-                      const aDays = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(asg) : 0;
-                      const aOver = aLim && aLim.days > 0 && aDays > aLim.days;
-                      return <div key={asg.id} className="flex items-center justify-between gap-1 text-[9px]"
-                        title={`${asg.id} · ${aStage?.label} · ${aDays}д на этапе`}>
-                        <div className="flex items-center gap-1 min-w-0">
-                          <span className="w-1 h-1 rounded-full shrink-0" style={{background: aStage?.color || color}}/>
-                          <span className="mono font-bold truncate" style={{color: B.t1}}>{asg.id}</span>
-                          <span className="truncate" style={{color: B.t3}}>· {aStage?.label}</span>
-                          {aOver && <span className="text-[8px] px-1 rounded font-bold shrink-0" style={{background: B.red, color: "white"}}>⚠</span>}
-                        </div>
-                        <span className="mono font-semibold shrink-0" style={{color: B.t2}}>{fmtByn(asg.amount || 0)}</span>
-                      </div>;
-                    })}
-                    {phaseAssignments.length > 3 && <div className="text-[8px] italic" style={{color: B.t3}}>
-                      ...и ещё {phaseAssignments.length - 3} {phaseAssignments.length - 3 === 1 ? "уступка" : "уступок"}
-                    </div>}
-                  </div>;
-                })()}
                 {p.actorsInvolved && <div className="text-[9px] italic leading-tight pt-1 border-t border-dashed" style={{color: B.t3, borderColor: B.border}}>
                   Участники: {p.actorsInvolved}
                 </div>}
