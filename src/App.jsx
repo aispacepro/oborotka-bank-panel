@@ -128,7 +128,7 @@ const ROLE_ACCESS = {
   analyst: {
     label: "Кредитный аналитик",
     description: "Верифицирует скоринг кредиторов и должников. ≤50K подписывает сам. >50K передаёт ЛПР.",
-    modules: ["dashboard", "pipeline", "clients", "scoring-admin"],
+    modules: ["my-tasks", "dashboard", "pipeline", "clients", "scoring-admin"],
     stages: ["analyst_verification", "grey_zone"],
     assignmentStages: ["debtor_scoring"],
     color: "#1E40AF",
@@ -137,7 +137,7 @@ const ROLE_ACCESS = {
   lpr: {
     label: "Лицо принимающее решение",
     description: "Одобряет заявки и уступки свыше 50K. Подписывает Решение ЭЦП.",
-    modules: ["dashboard", "pipeline", "clients", "assignments"],
+    modules: ["my-tasks", "dashboard", "pipeline", "clients", "assignments"],
     stages: ["lpr_decision"],
     assignmentStages: ["lpr_decision_assignment"],
     color: "#7C3AED",
@@ -146,7 +146,7 @@ const ROLE_ACCESS = {
   usko_prepare: {
     label: "УСКО — оформление договоров",
     description: "Активация клиентов. Проверка уступок, заполнение АБС, формирование ДФ, выдача финансирования. Ежедневный матчинг погашений.",
-    modules: ["dashboard", "pipeline", "clients", "documents", "assignments", "repayments"],
+    modules: ["my-tasks", "dashboard", "pipeline", "clients", "documents", "assignments", "repayments"],
     stages: ["client_activation"],
     assignmentStages: ["usko_review", "abs_card_creation", "df_generation", "payment_authorization", "payment_disbursed"],
     canRequestLimitReview: true,
@@ -156,7 +156,7 @@ const ROLE_ACCESS = {
   signer: {
     label: "Подписант договоров",
     description: "Подписывает договоры факторинга на каждую уступку ЭЦП банка.",
-    modules: ["dashboard", "pipeline", "documents", "assignments"],
+    modules: ["my-tasks", "dashboard", "pipeline", "documents", "assignments"],
     stages: [],
     assignmentStages: ["df_signing_bank"],
     color: "#06B6D4",
@@ -164,21 +164,12 @@ const ROLE_ACCESS = {
   },
   credit_ops: {
     label: "Кредитный менеджер",
-    description: "Отслеживает возврат средств от должников, эскалация просрочек, разбор погашений",
-    modules: ["dashboard", "assignments", "overdue", "clients", "repayments"],
+    description: "Отслеживает возврат средств от должников, ежедневный матчинг погашений",
+    modules: ["my-tasks", "dashboard", "assignments", "clients", "repayments"],
     stages: [],
-    assignmentStages: ["awaiting_debtor_payment", "debtor_overdue"],
+    assignmentStages: ["awaiting_debtor_payment"],
     color: "#6366F1",
     icon: "🔄",
-  },
-  legal: {
-    label: "Юр.отдел — взыскание",
-    description: "Работа с дефолтными уступками через суд",
-    modules: ["dashboard", "assignments", "overdue", "clients", "audit-log"],
-    stages: [],
-    assignmentStages: ["debtor_defaulted"],
-    color: "#991B1B",
-    icon: "⚖️",
   },
 };
 
@@ -295,45 +286,63 @@ function collectAllMyTasks(user, data) {
     });
   });
 
-  // 2. Assignment tasks (уступки на моих стадиях)
+  // 2. Assignment tasks — одна запись на каждую невыполненную задачу из ASSIGNMENT_TASKS
   if (myAssignmentStages.length > 0) {
     assignments.forEach(a => {
       if (!myAssignmentStages.includes(a.stage)) return;
       const days = getAssignmentDaysOnStage(a);
       const slaInfo = getAssignmentSlaInfo(a);
       const overdue = isAssignmentBankOverdue(a);
-      const waitingClient = isAssignmentWaitingClient(a);
-      let category;
-      if (overdue) category = "urgent";
-      else if (waitingClient) category = "waiting_client";
-      else category = "in_progress";
-
       const stageInfo = ASSIGNMENT_STAGES.find(s => s.id === a.stage);
-      allTasks.push({
-        type: "assignment",
-        id: a.id,
-        title: `Уступка к ${a.dealId}`,
-        subtitle: stageInfo?.label || a.stage,
-        amount: a.amount,
-        days, limit: slaInfo.days, overdue,
-        priority: "medium",
-        category,
-        icon: Package,
-        color: "#EA580C",
-        action:
-            a.stage === "debtor_scoring" ? "провести скоринг должника"
-          : a.stage === "usko_review" ? "проверить ДКП + ТТН + лимит"
-          : a.stage === "lpr_decision_assignment" ? "одобрить уступку (compliance)"
-          : a.stage === "abs_card_creation" ? "заполнить карточки АБС"
-          : a.stage === "df_generation" ? "сформировать ДФ + акт"
-          : a.stage === "df_signing_bank" ? "подписать ЭЦП банка"
-          : a.stage === "payment_authorization" ? "оформить распоряжение"
-          : a.stage === "payment_disbursed" ? "подтвердить выдачу"
-          : a.stage === "awaiting_debtor_payment" ? "напомнить должнику"
-          : a.stage === "debtor_overdue" ? "взыскать просрочку"
-          : a.stage === "debtor_defaulted" ? "судебное взыскание"
-          : "обработать",
-        raw: a,
+      const stageTasks = ASSIGNMENT_TASKS[a.stage] || [];
+      const completedTasks = a.completedTasks || {};
+
+      // Фильтруем задачи: только моей роли (или admin) И невыполненные И required
+      const myTasksOnStage = stageTasks.filter(t =>
+        (t.role === user.role || user.role === "admin") &&
+        !completedTasks[t.id] &&
+        (t.required || t.isFinal)
+      );
+
+      // Если на этапе нет задач для меня — пропускаем
+      if (myTasksOnStage.length === 0) return;
+
+      // Берём первую невыполненную (sequential lock — следующая в очереди)
+      const allRequired = stageTasks.filter(t => t.required && !t.isFinal);
+      const allRequiredDone = allRequired.every(t => completedTasks[t.id]);
+
+      myTasksOnStage.forEach(task => {
+        // Финальная задача — пока разблокирована только если все required выполнены
+        if (task.isFinal && !allRequiredDone) return;
+
+        const category = overdue ? "urgent" : "in_progress";
+        const creditor = COMPANIES.find(c => c.id === a.creditorId);
+        const debtor = COMPANIES.find(c => c.id === a.debtorId);
+        const isCritical = ["set_debtor_limit","sign_decision","sign_df_ecp","sign_act_ecp","send_to_abs","confirm_disbursement","confirm_payment"].includes(task.id);
+
+        allTasks.push({
+          type: "assignment_task", // НОВЫЙ type — конкретная задача
+          id: `${a.id}::${task.id}`, // уникальный id
+          assignmentId: a.id,
+          taskId: task.id,
+          title: task.label,
+          subtitle: `${a.id} · ${stageInfo?.label} · ${creditor?.name || "—"} → ${debtor?.name || "—"}`,
+          amount: a.amount,
+          days, limit: slaInfo.days, overdue,
+          priority: isCritical ? "high" : task.isFinal ? "high" : "medium",
+          category,
+          icon: task.icon || "📋",
+          iconComponent: Package,
+          color: stageInfo?.color || "#EA580C",
+          stageColor: stageInfo?.color,
+          stageLabel: stageInfo?.label,
+          action: task.label.toLowerCase(),
+          isFinal: task.isFinal,
+          isCritical,
+          durationMin: task.durationMin || 5,
+          raw: a,
+          taskRaw: task,
+        });
       });
     });
   }
@@ -439,7 +448,7 @@ function countMyTasks(user, data) {
   const result = {pipeline: 0, assignments: 0, documents: 0, urgent: 0};
   tasks.forEach(t => {
     if (t.type === "pipeline") result.pipeline++;
-    else if (t.type === "assignment") result.assignments++;
+    else if ((t.type === "assignment_task")) result.assignments++;
     else if (t.type === "document") result.documents++;
     if (t.category === "urgent" || t.category === "urgent_sign") result.urgent++;
   });
@@ -1033,53 +1042,6 @@ const ASSIGNMENTS = [
      {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2026-03-20 09:05",comment:"Ожидаем платёж должника до 2026-05-19"},
    ]},
 
-  // ═══ Debtor OVERDUE — просрочка возврата (critical) ═══
-  {id:"ASG-008", dealId:"REQ-005", creditorId:1, debtorId:4, amount:38000, discount:2356, toReceive:35644,
-   stage:"debtor_overdue", stageStartDate:"2026-03-21", createdDate:"2026-01-15", shippingDate:"2026-01-10",
-   ttnNumber:"ТТН-42",
-   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-01-17",
-   dsNumber:"ДС-REQ-005-008", dsDate:"2026-01-17",
-   signedByBank:"Татьяна К.", signedByBankDate:"2026-01-17",
-   signedByClientDate:"2026-01-18",
-   paymentApprovedBy:"Петрова Н.А.", paymentApprovedDate:"2026-01-19",
-   paidDate:"2026-01-20",
-   dueDate:"2026-03-21", // просрочка: срок был 21.03, сейчас 26.03 — 5 дней просрочки
-   overdueDays:5,
-   remindersSent:2,
-   credit_ops_assigned:"Ковалёв И.В.",
-   docs:{dkp:{status:"signed"}, ttn:{status:"signed"}, supplementaryAgreement:{status:"signed_all"}},
-   history:[
-     {action:"paid",user:"Автоматика",userRole:"system",date:"2026-01-20 09:00"},
-     {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2026-01-20 09:05"},
-     {action:"reminder_sent",user:"Система",userRole:"system",date:"2026-03-18",comment:"Напоминание #1 за 3 дня до срока"},
-     {action:"debtor_overdue",user:"Система",userRole:"system",date:"2026-03-22",comment:"Просрочка начата автоматически"},
-     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-03-23",comment:"Повторное напоминание должнику"},
-   ]},
-
-  // ═══ Debtor DEFAULTED — передано юр.отделу (critical) ═══
-  {id:"ASG-009", dealId:"REQ-003", creditorId:1, debtorId:6, amount:120000, discount:7440, toReceive:112560,
-   stage:"debtor_defaulted", stageStartDate:"2026-02-15", createdDate:"2025-10-10", shippingDate:"2025-10-05",
-   ttnNumber:"ТТН-28",
-   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2025-10-12",
-   dsNumber:"ДС-REQ-003-009", dsDate:"2025-10-12",
-   paidDate:"2025-10-15",
-   dueDate:"2026-01-13", // просрочка >30 дней — дефолт
-   overdueDays:72,
-   defaultedDate:"2026-02-15",
-   legal_assigned:"Кузнецов А.П.",
-   courtCaseNumber:"Дело №А-123/2026",
-   docs:{dkp:{status:"signed"}, ttn:{status:"signed"}, supplementaryAgreement:{status:"signed_all"}},
-   history:[
-     {action:"paid",user:"Автоматика",userRole:"system",date:"2025-10-15"},
-     {action:"awaiting_debtor",user:"Система",userRole:"system",date:"2025-10-15"},
-     {action:"debtor_overdue",user:"Система",userRole:"system",date:"2026-01-14",comment:"Просрочка начата"},
-     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-01-20",comment:"Претензия #1"},
-     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-01-27",comment:"Претензия #2"},
-     {action:"reminder_sent",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-02-05",comment:"Финальная претензия с уведомлением о передаче в юр.отдел"},
-     {action:"debtor_defaulted",user:"Ковалёв И.В.",userRole:"credit_ops",date:"2026-02-15",comment:"Передано юр.отделу для взыскания через суд"},
-     {action:"court_filed",user:"Кузнецов А.П.",userRole:"legal",date:"2026-02-20",comment:"Исковое заявление в Экономический суд Минска, дело №А-123/2026"},
-   ]},
-
   // UCKO check — SLA bank
   {id:"ASG-002", dealId:"REQ-010", creditorId:1, debtorId:2, amount:30000,
    stage:"usko_review", stageStartDate:"2026-03-24", createdDate:"2026-03-22",
@@ -1445,10 +1407,6 @@ const NOTIFICATIONS = [
    link:{page:"assignments"}, createdAt:"2026-03-26 15:30", read:false, isNewWorkflow:true},
 
   // ═══ Recover phase ═══
-  {id:"n15", userRole:"credit_ops", type:"new_task",
-   title:"⚠ Просрочка должника", subtext:"ASG-008 · 25 000 BYN · 28 дней просрочки",
-   link:{page:"assignments", asgId:"ASG-008"}, createdAt:"2026-03-26 09:00", read:false},
-
   {id:"n10", userRole:"admin", type:"sla_breach",
    title:"SLA банка нарушен", subtext:"ASG-004 · подписант тянет",
    link:{page:"assignments", asgId:"ASG-004"}, createdAt:"2026-03-26 09:00", read:false},
@@ -2095,6 +2053,7 @@ const SCORING_QUALITATIVE = [
 ];
 
 const BANK_NAV = [
+  {id:"my-tasks", label:"Мои задачи", icon:Inbox, badge:0, primary:true},
   {id:"dashboard", label:"Дашборд", icon:LayoutDashboard},
   {id:"pipeline", label:"Скоринг клиентов", icon:Zap, badge:11},
   {id:"assignments", label:"Уступки", icon:Package, badge:5},
@@ -2135,7 +2094,6 @@ const BANK_USERS = [
   {id:4, name:"Татьяна К.", position:"Замначальника (доверенность)", role:"signer", email:"tatyana@neobank.by", status:"active"},
   {id:5, name:"Козлова Е.В.", position:"Руководитель", role:"admin", email:"kozlova@neobank.by", status:"active"},
   {id:6, name:"Ковалёв И.В.", position:"Кредитный менеджер (возврат)", role:"credit_ops", email:"kovalev@neobank.by", status:"active"},
-  {id:7, name:"Кузнецов А.П.", position:"Юрист (взыскание)", role:"legal", email:"kuznetsov@neobank.by", status:"active"},
 ];
 
 // ─── UTILS ───
@@ -2243,7 +2201,6 @@ function generatePaymentSchedule(asg) {
     const daysUntilDue = Math.ceil((due - today) / 86400000);
     let status = "pending";
     if (asg.stage === "assignment_closed") status = "paid";
-    else if (asg.stage === "debtor_overdue" || asg.stage === "debtor_defaulted") status = "overdue";
 
     schedule.push({
       type: "principal",
@@ -2252,9 +2209,7 @@ function generatePaymentSchedule(asg) {
       dueDate: asg.dueDate,
       status,
       daysUntilDue,
-      comment: status === "overdue" ? `Просрочка ${Math.abs(daysUntilDue)} дн.` :
-               status === "paid" ? "Получено" :
-               `До срока ${daysUntilDue} дн.`,
+      comment: status === "paid" ? "Получено" : `До срока ${daysUntilDue} дн.`,
     });
   }
 
@@ -2971,19 +2926,36 @@ function RoleSwitcherHeader({currentUser, onChange}) {
           <div className="px-3 py-2 text-[10px] font-bold uppercase tracking-wider border-b" style={{color:B.t3, borderColor:B.border}}>
             Выбрать роль:
           </div>
-          {Object.entries(ROLE_ACCESS).map(([key, role])=>(
-            <button key={key}
+          {Object.entries(ROLE_ACCESS).map(([key, role])=>{
+            // Подсчёт активных задач для этой роли (предпросмотр)
+            const roleTasks = (() => {
+              try {
+                const fakeUser = {role: key, name: "preview"};
+                const tasks = collectAllMyTasks(fakeUser, {
+                  pipeline: PIPELINE || [],
+                  assignments: ASSIGNMENTS || [],
+                  documents: DOCUMENTS_REGISTRY || [],
+                });
+                return tasks.length;
+              } catch(e) { return 0; }
+            })();
+            return <button key={key}
               onClick={()=>{onChange(key); setOpen(false)}}
               className="w-full flex items-start gap-2.5 px-3 py-2.5 text-left hover:bg-slate-50 border-b last:border-0"
               style={{borderColor:B.border}}>
               <span className="text-base shrink-0 mt-0.5">{role.icon}</span>
               <div className="flex-1 min-w-0">
-                <div className="text-xs font-bold" style={{color:role.color}}>{role.label}</div>
+                <div className="flex items-center gap-2">
+                  <div className="text-xs font-bold" style={{color:role.color}}>{role.label}</div>
+                  {roleTasks > 0 && <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold mono shrink-0" style={{background: role.color + "15", color: role.color}}>
+                    {roleTasks}
+                  </span>}
+                </div>
                 <div className="text-[10px] mt-0.5" style={{color:B.t3}}>{role.description}</div>
               </div>
               {currentUser.role === key && <Check size={14} style={{color:role.color}} className="shrink-0 mt-1"/>}
-            </button>
-          ))}
+            </button>;
+          })}
           <div className="px-3 py-2 text-[10px] flex items-center gap-1.5" style={{color:B.t3, background:"#F8FAFC", borderTop:`1px solid ${B.border}`, borderRadius:"0 0 12px 12px"}}>
             <Info size={10}/>
             Демонстрация ролевого доступа
@@ -3223,10 +3195,10 @@ function AppInner() {
   const getInitialPage = () => {
     try {
       const hash = window.location.hash.replace(/^#\/?/, "");
-      const validPages = ["dashboard", "pipeline", "assignments", "clients", "portfolio", "documents", "stoplist", "scoring-admin", "audit-log", "settings", "overdue", "rates", "abs", "document-detail", "client-detail", "deal-detail"];
+      const validPages = ["my-tasks", "dashboard", "pipeline", "assignments", "clients", "portfolio", "documents", "stoplist", "scoring-admin", "audit-log", "settings", "rates", "abs", "document-detail", "client-detail", "deal-detail"];
       if (hash && validPages.includes(hash)) return hash;
     } catch(e) {}
-    return "dashboard";
+    return "my-tasks";
   };
 
   const [active, setActiveRaw] = useState(getInitialPage);
@@ -3503,8 +3475,8 @@ function AppInner() {
       }
       if (gPressed) {
         const navMap = {
-          d: "dashboard", p: "pipeline", a: "assignments", c: "clients",
-          o: "overdue", s: "stoplist", u: "audit-log", r: "portfolio",
+          m: "my-tasks", d: "dashboard", p: "pipeline", a: "assignments", c: "clients",
+          s: "stoplist", u: "audit-log", r: "portfolio",
         };
         const target = navMap[e.key];
         if (target) {
@@ -3614,17 +3586,36 @@ function AppInner() {
             const isActive = active===item.id || (navStack.length>0 && navStack[0]===item.id);
             const Icon = item.icon;
             // Dynamic badge count based on current user's tasks (not static mock)
-            const countKey = item.id === "pipeline" ? "pipeline"
+            const countKey = item.id === "my-tasks" ? "total"
+              : item.id === "pipeline" ? "pipeline"
               : item.id === "assignments" ? "assignments"
               : item.id === "documents" ? "documents" : null;
-            const dynCount = countKey ? myTaskCounts[countKey] : 0;
+            const dynCount = countKey === "total" ? (myTaskCounts.pipeline + myTaskCounts.assignments + myTaskCounts.documents)
+              : countKey ? myTaskCounts[countKey]
+              : 0;
             const hasUrgent = countKey && myTaskCounts.urgent > 0 && dynCount > 0;
-            return <button key={item.id} onClick={()=>{setActive(item.id);setNavStack([])}} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium transition-all ${isActive?"text-white":"text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`} style={isActive?{background:B.accent}:undefined}>
-              <Icon size={18} className="shrink-0"/>
-              {sidebarOpen&&<span className="text-[13px] leading-tight">{item.label}</span>}
-              {sidebarOpen && dynCount > 0 && <span className={`ml-auto px-1.5 py-0.5 rounded-md text-[10px] font-bold text-white ${newTaskIndicator[item.id] || hasUrgent ? "animate-pulse" : ""}`}
-                style={{background: hasUrgent ? B.red : "#64748B"}}>{dynCount}</span>}
-            </button>;
+            const isPrimary = item.primary;
+            return <React.Fragment key={item.id}>
+              {/* Separator after primary item */}
+              {isPrimary && <button onClick={()=>{setActive(item.id);setNavStack([])}}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium transition-all ${isActive ? "text-white" : "text-white hover:opacity-90"}`}
+                style={isActive
+                  ? {background: B.accent, boxShadow: `0 0 0 1px ${B.accent}80`}
+                  : {background: B.accent + "30", border: `1px solid ${B.accent}50`}}>
+                <Icon size={18} className="shrink-0"/>
+                {sidebarOpen && <span className="text-[13px] leading-tight font-bold">{item.label}</span>}
+                {sidebarOpen && dynCount > 0 && <span className={`ml-auto px-1.5 py-0.5 rounded-md text-[10px] font-black text-white ${hasUrgent ? "animate-pulse" : ""}`}
+                  style={{background: hasUrgent ? B.red : B.accent}}>{dynCount}</span>}
+              </button>}
+              {!isPrimary && <button onClick={()=>{setActive(item.id);setNavStack([])}} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium transition-all ${isActive?"text-white":"text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`} style={isActive?{background:B.accent}:undefined}>
+                <Icon size={18} className="shrink-0"/>
+                {sidebarOpen&&<span className="text-[13px] leading-tight">{item.label}</span>}
+                {sidebarOpen && dynCount > 0 && <span className={`ml-auto px-1.5 py-0.5 rounded-md text-[10px] font-bold text-white ${newTaskIndicator[item.id] || hasUrgent ? "animate-pulse" : ""}`}
+                  style={{background: hasUrgent ? B.red : "#64748B"}}>{dynCount}</span>}
+              </button>}
+              {/* Visual separator after the primary My Tasks item */}
+              {isPrimary && <div className="my-2 mx-3 border-t border-slate-700/50"/>}
+            </React.Fragment>;
           })}
         </nav>
         <div className="p-4 border-t border-slate-700/50">
@@ -3674,6 +3665,7 @@ function AppInner() {
             </div>
           </div>}
           {!canAccessModule(currentUser, active) ? <AccessDenied moduleName={active} onGoHome={()=>setActive("dashboard")}/> : <PageErrorBoundary key={active} pageName={BANK_NAV.find(n => n.id === active)?.label || active}>
+          {active==="my-tasks"&&<MyTasksPage currentUser={currentUser} pushNav={pushNav} setToast={setToast}/>}
           {active==="dashboard"&&<DashboardPage currentUser={currentUser} pushNav={pushNav} setToast={setToast}/>}
           {active==="pipeline"&&<PipelinePage currentUser={currentUser} setToast={setToast} favorites={favorites} toggleFavorite={toggleFavorite}/>}
           {active==="assignments"&&<AssignmentsPage currentUser={currentUser} setToast={setToast}/>}
@@ -3783,7 +3775,6 @@ function AppInner() {
                   {keys: ["G", "A"], desc: "Уступки (Assignments)"},
                   {keys: ["G", "C"], desc: "Клиенты (Clients)"},
                   {keys: ["G", "R"], desc: "Портфель (poRtfolio)"},
-                  {keys: ["G", "O"], desc: "Просрочки (Overdue)"},
                   {keys: ["G", "S"], desc: "Стоп-лист"},
                   {keys: ["G", "U"], desc: "Аудит-лог (aUdit)"},
                 ].map((hk, i) => <div key={i} className="flex items-center justify-between">
@@ -3823,6 +3814,357 @@ function AppInner() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════
+// PAGE: МОИ ЗАДАЧИ — единая страница задач для текущей роли.
+// Собирает все задачи (pipeline + assignment_task + document)
+// для роли пользователя и группирует по фазам/типам.
+// ═══════════════════════════════════════════════════════════
+function MyTasksPage({pushNav, setToast, currentUser}) {
+  // Собираем все задачи моей роли
+  const allMyTasks = useMemo(() => {
+    return collectAllMyTasks(currentUser, {
+      pipeline: PIPELINE || [],
+      assignments: ASSIGNMENTS || [],
+      documents: DOCUMENTS_REGISTRY || [],
+    });
+  }, [currentUser]);
+
+  const roleInfo = ROLE_ACCESS[currentUser.role];
+
+  // Группировка
+  const overdueTasks = allMyTasks.filter(t => t.overdue);
+  const criticalTasks = allMyTasks.filter(t => t.isCritical && !t.overdue);
+  const finalTasks = allMyTasks.filter(t => t.isFinal && !t.overdue && !t.isCritical);
+  const pipelineTasks = allMyTasks.filter(t => t.type === "pipeline");
+  const documentTasks = allMyTasks.filter(t => t.type === "document");
+  const assignmentTasks = allMyTasks.filter(t => t.type === "assignment_task");
+
+  // Сегментация задач уступок по фазам
+  const tasksByPhase = {};
+  ASSIGNMENT_PHASES.forEach(p => tasksByPhase[p.id] = []);
+  assignmentTasks.forEach(t => {
+    const stage = ASSIGNMENT_STAGES.find(s => s.id === t.raw?.stage);
+    const phaseId = stage?.phase || "other";
+    if (!tasksByPhase[phaseId]) tasksByPhase[phaseId] = [];
+    tasksByPhase[phaseId].push(t);
+  });
+
+  // Hero — самая срочная
+  const heroTask = (() => {
+    if (allMyTasks.length === 0) return null;
+    const sorted = [...allMyTasks].sort((a, b) => {
+      if (a.overdue && !b.overdue) return -1;
+      if (!a.overdue && b.overdue) return 1;
+      if (a.isCritical && !b.isCritical) return -1;
+      if (!a.isCritical && b.isCritical) return 1;
+      return ((b.amount || 0) - (a.amount || 0));
+    });
+    return sorted[0];
+  })();
+
+  const navigateToTask = (task) => {
+    if (task.type === "pipeline") {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("oborotka:nav", {detail: {page: "pipeline"}}));
+      }
+    } else if (task.type === "assignment_task" || task.type === "assignment") {
+      const asgId = task.assignmentId || task.id;
+      // Сохраняем pending nav в sessionStorage чтобы AssignmentsPage прочитала при mount
+      try {
+        sessionStorage.setItem("pendingAssignmentNav", JSON.stringify({
+          assignmentId: asgId,
+          taskId: task.taskId,
+          ts: Date.now(),
+        }));
+      } catch(e) {}
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("oborotka:nav", {
+          detail: {page: "assignments", assignmentId: asgId, taskId: task.taskId},
+        }));
+      }
+    } else if (task.type === "document") {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("oborotka:open-doc", {detail: {docId: task.id}}));
+      }
+    }
+  };
+
+  return <div>
+    <PageHeader title="Мои задачи" breadcrumbs={["Мои задачи"]}/>
+
+    {/* ═══ Role banner — кто я и сколько задач ═══ */}
+    <Card className="p-4 mb-5 flex items-center gap-4" style={{
+      background: (roleInfo?.color || B.accent) + "08",
+      borderColor: (roleInfo?.color || B.accent) + "30",
+    }}>
+      <div className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl shrink-0" style={{background: "white"}}>
+        {roleInfo?.icon || "👤"}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <div className="text-sm font-bold" style={{color: B.t1}}>{currentUser.name}</div>
+          <div className="text-[11px]" style={{color: roleInfo?.color || B.accent}}>· {roleInfo?.label}</div>
+        </div>
+        <div className="text-[11px] mt-0.5" style={{color: B.t2}}>{roleInfo?.description}</div>
+      </div>
+      <div className="text-right shrink-0">
+        <div className="text-2xl font-black mono" style={{color: roleInfo?.color || B.accent}}>{allMyTasks.length}</div>
+        <div className="text-[10px]" style={{color: B.t3}}>активных задач</div>
+      </div>
+    </Card>
+
+    {/* ═══ Empty state ═══ */}
+    {allMyTasks.length === 0 && <Card className="p-12 text-center" style={{
+      background: "linear-gradient(135deg, white 0%, " + B.greenL + " 100%)",
+      borderColor: B.green + "30",
+    }}>
+      <div className="text-6xl mb-3">✨</div>
+      <div className="text-lg font-black mb-1" style={{color: B.green}}>Все задачи выполнены!</div>
+      <div className="text-xs mb-4" style={{color: B.t2}}>
+        У вас сейчас нет задач на ваших стадиях факторингового конвейера.
+      </div>
+      <div className="flex items-center justify-center gap-2">
+        <Btn size="sm" variant="primary" icon={GitBranch} onClick={() => pushNav && pushNav({page: "assignments"})}>
+          Воронка уступок
+        </Btn>
+      </div>
+    </Card>}
+
+    {/* ═══ Hero — самая срочная задача ═══ */}
+    {heroTask && (() => {
+      const heroIcon = heroTask.type === "assignment_task" ? (heroTask.icon || "📦")
+        : heroTask.type === "pipeline" ? "⚡"
+        : heroTask.type === "document" ? "📄" : "📋";
+      const heroAccent = heroTask.overdue ? B.red : (heroTask.stageColor || heroTask.color || B.accent);
+      return <Card className="p-5 mb-5 relative overflow-hidden" style={{
+        background: "linear-gradient(135deg, white 0%, " + heroAccent + "08 100%)",
+        borderColor: heroAccent + "60",
+        borderWidth: 2,
+      }}>
+        <div className="absolute top-0 right-0 w-32 h-32 opacity-10 rounded-bl-full" style={{background: heroAccent}}/>
+        <div className="flex items-start justify-between gap-4 relative">
+          <div className="flex items-start gap-3 min-w-0 flex-1">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-2xl" style={{background: heroAccent + "15", border: `1px solid ${heroAccent}30`}}>
+              {heroIcon}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: heroAccent}}>
+                  {heroTask.overdue ? "🔥 СРОЧНО — ПРОСРОЧЕНО SLA" : "👉 ВАША ГЛАВНАЯ ЗАДАЧА"}
+                </span>
+                {heroTask.overdue && <span className="text-[9px] px-2 py-0.5 rounded-full font-bold animate-pulse" style={{background: B.red, color: "white"}}>
+                  ⚠ {heroTask.days - heroTask.limit}д просрочки
+                </span>}
+              </div>
+              <div className="text-base font-black" style={{color: B.t1}}>
+                {heroTask.title}
+                {heroTask.amount && <span style={{color: heroAccent}}> · {fmtByn(heroTask.amount)}</span>}
+              </div>
+              <div className="text-[11px] mt-1" style={{color: B.t2}}>
+                {heroTask.assignmentId && <>
+                  <span className="font-mono font-bold">{heroTask.assignmentId}</span>
+                  <span className="mx-1.5">·</span>
+                </>}
+                {heroTask.stageLabel && <>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{background: (heroTask.stageColor || B.accent) + "15", color: heroTask.stageColor || B.accent}}>
+                    {heroTask.stageLabel}
+                  </span>
+                  <span className="mx-1.5">·</span>
+                </>}
+                <span>{heroTask.subtitle?.split(" · ")[2] || heroTask.subtitle}</span>
+              </div>
+              <div className="flex items-center gap-3 mt-2 text-[10px]" style={{color: B.t3}}>
+                {heroTask.days != null && <span>📅 {heroTask.days}д на этапе</span>}
+                {heroTask.durationMin > 0 && <span>~{heroTask.durationMin} мин</span>}
+                {heroTask.isCritical && <span style={{color: B.red, fontWeight: 700}}>🛡 Критическое</span>}
+                {heroTask.isFinal && <span style={{color: heroAccent, fontWeight: 700}}>⚡ Финальная задача этапа</span>}
+              </div>
+            </div>
+          </div>
+          <Btn size="lg" variant="primary" icon={ArrowRight}
+            onClick={() => navigateToTask(heroTask)}
+            style={{background: heroAccent}}>
+            Открыть и выполнить
+          </Btn>
+        </div>
+        {allMyTasks.length > 1 && <div className="mt-4 pt-3 border-t flex items-center justify-between text-[10px]" style={{borderColor: B.border, color: B.t3}}>
+          <span>
+            После этой задачи у вас ещё <strong style={{color: B.t1}}>{allMyTasks.length - 1}</strong> {allMyTasks.length - 1 === 1 ? "задача" : (allMyTasks.length - 1 >= 2 && allMyTasks.length - 1 <= 4) ? "задачи" : "задач"}
+          </span>
+          <span>
+            🔥 {overdueTasks.length} просрочек
+            <span className="mx-2">·</span>
+            🛡 {criticalTasks.length} критических
+          </span>
+        </div>}
+      </Card>;
+    })()}
+
+    {/* ═══ Просроченные задачи (отдельная секция) ═══ */}
+    {overdueTasks.length > 0 && <Card className="overflow-hidden mb-5" style={{borderColor: B.red + "40", borderWidth: 2}}>
+      <div className="px-4 py-2.5 flex items-center justify-between" style={{background: B.redL}}>
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={14} style={{color: B.red}} className="animate-pulse"/>
+          <span className="text-xs font-black" style={{color: B.red}}>🔥 ПРОСРОЧЕНО SLA</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-bold" style={{background: "white", color: B.red}}>
+            {overdueTasks.length}
+          </span>
+        </div>
+        <span className="text-[10px] font-semibold" style={{color: B.red}}>требует немедленного действия</span>
+      </div>
+      <div className="divide-y" style={{borderColor: B.border}}>
+        {overdueTasks.map(t => <MyTaskRow key={t.id} task={t} onClick={() => navigateToTask(t)}/>)}
+      </div>
+    </Card>}
+
+    {/* ═══ Pipeline — задачи скоринга (для аналитика, ЛПР, УСКО, admin) ═══ */}
+    {pipelineTasks.length > 0 && <Card className="overflow-hidden mb-5">
+      <div className="px-4 py-2.5 flex items-center justify-between" style={{background: B.accentL}}>
+        <div className="flex items-center gap-2">
+          <Zap size={14} style={{color: B.accent}}/>
+          <span className="text-xs font-bold" style={{color: B.accent}}>Скоринг клиентов</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-bold" style={{background: "white", color: B.accent}}>
+            {pipelineTasks.length}
+          </span>
+        </div>
+        <button onClick={() => pushNav && pushNav({page: "pipeline"})} className="text-[10px] hover:underline" style={{color: B.accent}}>
+          Открыть конвейер →
+        </button>
+      </div>
+      <div className="divide-y" style={{borderColor: B.border}}>
+        {pipelineTasks.slice(0, 10).map(t => <MyTaskRow key={t.id} task={t} onClick={() => navigateToTask(t)}/>)}
+        {pipelineTasks.length > 10 && <div className="px-4 py-2 text-[10px] text-center" style={{color: B.t3}}>
+          ...и ещё {pipelineTasks.length - 10}
+        </div>}
+      </div>
+    </Card>}
+
+    {/* ═══ Задачи уступок — сегментированы по фазам конвейера ═══ */}
+    {assignmentTasks.length > 0 && <div className="mb-5">
+      <div className="flex items-center gap-2 mb-3">
+        <h2 className="text-base font-black" style={{color: B.t1}}>Задачи по уступкам</h2>
+        <span className="text-[11px] px-2 py-0.5 rounded-full font-bold" style={{background: B.accentL, color: B.accent}}>
+          {assignmentTasks.length}
+        </span>
+        <span className="text-[10px]" style={{color: B.t3}}>· сгруппированы по фазам</span>
+      </div>
+      <div className="space-y-3">
+        {ASSIGNMENT_PHASES.filter(p => tasksByPhase[p.id]?.length > 0).map(phase => {
+          const phaseTasks = tasksByPhase[phase.id];
+          return <Card key={phase.id} className="overflow-hidden">
+            <div className="px-4 py-2.5 flex items-center justify-between" style={{background: "#F8FAFC", borderBottom: `1px solid ${B.border}`}}>
+              <div className="flex items-center gap-2">
+                <span className="text-base">{phase.icon}</span>
+                <span className="text-xs font-bold" style={{color: B.t1}}>{phase.label}</span>
+                <span className="text-[10px]" style={{color: B.t3}}>· {phaseTasks.length} {phaseTasks.length === 1 ? "задача" : (phaseTasks.length >= 2 && phaseTasks.length <= 4) ? "задачи" : "задач"}</span>
+              </div>
+            </div>
+            <div className="divide-y" style={{borderColor: B.border}}>
+              {phaseTasks.slice(0, 8).map(t => <MyTaskRow key={t.id} task={t} onClick={() => navigateToTask(t)}/>)}
+              {phaseTasks.length > 8 && <div className="px-4 py-2 text-[10px] text-center" style={{color: B.t3}}>
+                ...и ещё {phaseTasks.length - 8}
+              </div>}
+            </div>
+          </Card>;
+        })}
+      </div>
+    </div>}
+
+    {/* ═══ Документы ═══ */}
+    {documentTasks.length > 0 && <Card className="overflow-hidden mb-5">
+      <div className="px-4 py-2.5 flex items-center justify-between" style={{background: "#FFEDD5"}}>
+        <div className="flex items-center gap-2">
+          <FileText size={14} style={{color: B.orange}}/>
+          <span className="text-xs font-bold" style={{color: B.orange}}>Документы</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-bold" style={{background: "white", color: B.orange}}>
+            {documentTasks.length}
+          </span>
+        </div>
+      </div>
+      <div className="divide-y" style={{borderColor: B.border}}>
+        {documentTasks.slice(0, 10).map(t => <MyTaskRow key={t.id} task={t} onClick={() => navigateToTask(t)}/>)}
+      </div>
+    </Card>}
+
+    {/* ═══ Sticky footer ═══ */}
+    {allMyTasks.length > 0 && <div className="fixed bottom-0 left-0 right-0 z-30 px-4 py-2.5"
+      style={{
+        background: "rgba(255,255,255,0.95)",
+        backdropFilter: "blur(8px)",
+        borderTop: `1px solid ${B.border}`,
+        boxShadow: "0 -2px 8px rgba(0,0,0,0.04)",
+      }}>
+      <div className="max-w-screen-xl mx-auto flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 text-[11px]">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full" style={{background: roleInfo?.color || B.accent}}/>
+            <span style={{color: B.t2}}>Активных задач:</span>
+            <strong style={{color: B.t1}}>{allMyTasks.length}</strong>
+          </div>
+          {overdueTasks.length > 0 && <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full animate-pulse" style={{background: B.red}}/>
+            <span style={{color: B.t2}}>Просрочек:</span>
+            <strong style={{color: B.red}}>{overdueTasks.length}</strong>
+          </div>}
+          {criticalTasks.length > 0 && <div className="flex items-center gap-1.5" style={{color: B.t3}}>
+            <span>🛡 {criticalTasks.length} критических</span>
+          </div>}
+        </div>
+      </div>
+    </div>}
+  </div>;
+}
+
+// MyTaskRow — единая строка задачи в списке
+function MyTaskRow({task, onClick}) {
+  const isEmojiIcon = typeof task.icon === "string";
+  const IconComp = !isEmojiIcon ? task.icon : null;
+  return <button onClick={onClick}
+    className="w-full px-4 py-3 hover:bg-slate-50 cursor-pointer flex items-center justify-between gap-3 text-left transition-colors">
+    <div className="flex items-center gap-3 min-w-0 flex-1">
+      <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{background: task.color + "15"}}>
+        {isEmojiIcon ? <span className="text-base">{task.icon}</span> : (IconComp && <IconComp size={14} style={{color: task.color}}/>)}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-xs font-bold" style={{color: "#0F172A"}}>{task.title}</span>
+          {task.isCritical && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{background: "#FEE2E2", color: "#DC2626"}}>🛡</span>}
+          {task.isFinal && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{background: (task.stageColor || task.color) + "20", color: task.stageColor || task.color}}>⚡</span>}
+          {task.overdue && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold animate-pulse" style={{background: "#DC2626", color: "white"}}>⚠ SLA</span>}
+        </div>
+        <div className="text-[10px] mt-0.5" style={{color: "#94A3B8"}}>
+          {task.assignmentId && <>
+            <span className="mono font-bold">{task.assignmentId}</span>
+            <span className="mx-1">·</span>
+          </>}
+          {!task.assignmentId && task.id && <>
+            <span className="mono font-bold">{task.id}</span>
+            <span className="mx-1">·</span>
+          </>}
+          {task.stageLabel && <>
+            <span>{task.stageLabel}</span>
+            <span className="mx-1">·</span>
+          </>}
+          {task.subtitle && task.subtitle !== task.stageLabel && <span>{task.subtitle?.split(" · ").slice(2).join(" · ") || task.subtitle}</span>}
+          {task.amount > 0 && <>
+            <span className="mx-1">·</span>
+            <span className="mono">{fmtByn(task.amount)}</span>
+          </>}
+          {task.durationMin > 0 && <>
+            <span className="mx-1">·</span>
+            <span>~{task.durationMin} мин</span>
+          </>}
+          {task.days != null && task.limit != null && <>
+            <span className="mx-1">·</span>
+            <span style={{color: task.overdue ? "#DC2626" : "#64748B"}}>{task.days}/{task.limit}д</span>
+          </>}
+        </div>
+      </div>
+    </div>
+    <ArrowRight size={14} style={{color: task.color, opacity: 0.5}}/>
+  </button>;
+}
+
 // ═══════════════════════════════════════
 // PAGE 1: DASHBOARD
 // ═══════════════════════════════════════
@@ -3844,10 +4186,6 @@ function DashboardPage({pushNav, setToast, currentUser}) {
   // ─── Recover phase metrics — deals where we paid client, awaiting debtor ───
   const awaitingDebtorAsgs = ASSIGNMENTS.filter(a => a.stage === "awaiting_debtor_payment");
   const awaitingDebtorAmount = awaitingDebtorAsgs.reduce((s, a) => s + (a.amount || 0), 0);
-  const debtorOverdueAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_overdue");
-  const debtorOverdueAmount = debtorOverdueAsgs.reduce((s, a) => s + (a.amount || 0), 0);
-  const debtorDefaultedAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_defaulted");
-  const debtorDefaultedAmount = debtorDefaultedAsgs.reduce((s, a) => s + (a.amount || 0), 0);
   const closedSuccessAsgs = ASSIGNMENTS.filter(a => a.stage === "assignment_closed");
   const totalEarnedFromClosed = closedSuccessAsgs.reduce((s, a) => s + (a.bankEarned || 0), 0);
 
@@ -3968,11 +4306,10 @@ function DashboardPage({pushNav, setToast, currentUser}) {
         tooltip="Количество активных компаний"/>
     </div>
     <div className="grid grid-cols-2 gap-4 mb-6">
-      <KPICard label="Просрочки"
-        value={`${overdueDeals.length} / ${fmtByn(overdueDeals.reduce((s,d)=>s+d.amount,0))}`}
-        icon={AlertTriangle} color={B.red}
-        trend={-8} trendLabel="просрочек меньше"
-        tooltip="Количество и сумма просроченных уступок"/>
+      <KPICard label="Ждём платёж от должников"
+        value={`${awaitingDebtorAsgs.length} / ${fmtByn(awaitingDebtorAmount)}`}
+        icon={Clock} color="#6366F1"
+        tooltip="Уступки на стадии awaiting_debtor_payment — ждём перечисления от должников"/>
       <KPICard label="Доход банка (мес)" value={fmtByn(bankIncome)}
         icon={Building2} color={B.green} trend={8}
         periodValue={fmtByn(Math.round(bankIncome / 1.08))}
@@ -4051,42 +4388,20 @@ function DashboardPage({pushNav, setToast, currentUser}) {
             Фаза возврата от должников
           </h3>
           <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
-            Деньги уже выплачены клиентам — ждём их обратно от должников
+            Деньги уже выплачены клиентам — ждём платёж от должников. Просрочки и взыскание банк ведёт на своей стороне.
           </div>
         </div>
       </div>
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         <Card className="p-3" style={{background: "white"}}>
           <div className="flex items-center gap-2 mb-2">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: "#EEF2FF"}}>
               <Clock size={14} style={{color: "#6366F1"}}/>
             </div>
-            <div className="text-[10px]" style={{color: B.t3}}>Ждём платёж</div>
+            <div className="text-[10px]" style={{color: B.t3}}>Ждём платёж от должников</div>
           </div>
           <div className="text-lg font-black" style={{color: B.t1}}>{awaitingDebtorAsgs.length}</div>
           <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(awaitingDebtorAmount)}</div>
-        </Card>
-
-        <Card className="p-3" style={{background: "white", borderColor: debtorOverdueAsgs.length > 0 ? B.red + "40" : undefined}}>
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: B.redL}}>
-              <AlertTriangle size={14} style={{color: B.red}} className={debtorOverdueAsgs.length > 0 ? "animate-pulse" : ""}/>
-            </div>
-            <div className="text-[10px]" style={{color: B.t3}}>Просрочка должника</div>
-          </div>
-          <div className="text-lg font-black" style={{color: debtorOverdueAsgs.length > 0 ? B.red : B.t3}}>{debtorOverdueAsgs.length}</div>
-          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(debtorOverdueAmount)}</div>
-        </Card>
-
-        <Card className="p-3" style={{background: "white", borderColor: debtorDefaultedAsgs.length > 0 ? "#991B1B40" : undefined}}>
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background: "#FEE2E2"}}>
-              <span style={{fontSize: 14}}>⚖️</span>
-            </div>
-            <div className="text-[10px]" style={{color: B.t3}}>Юр.отдел</div>
-          </div>
-          <div className="text-lg font-black" style={{color: debtorDefaultedAsgs.length > 0 ? "#991B1B" : B.t3}}>{debtorDefaultedAsgs.length}</div>
-          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(debtorDefaultedAmount)}</div>
         </Card>
 
         <Card className="p-3" style={{background: "white"}}>
@@ -4300,10 +4615,8 @@ const ASSIGNMENT_STAGES = [
     actionHint:"Должник погасил, уступка закрыта успешно. Банк заработал дисконт", whoActs:"⚙ Система"},
 
   // ═══ Особые этапы (вне линейного потока) ═══
-  {id:"debtor_overdue", label:"Просрочка", color:"#DC2626", role:"credit_ops", actor:"bank", phase:"recover",
-    actionHint:"Кредитный менеджер: напоминание / претензия / эскалация", whoActs:"🏦 Кредитный менеджер"},
-  {id:"debtor_defaulted", label:"Дефолт", color:"#991B1B", role:"legal", actor:"bank", phase:"recover",
-    actionHint:"Передача дела в юр.отдел для взыскания через суд", whoActs:"🏦 Юр.отдел"},
+  // Просрочки и дефолты обрабатываются банком на своей стороне (не в платформе).
+  // Если должник не платит — после awaiting_debtor_payment банк закрывает уступку у себя.
   {id:"returned_to_creditor", label:"Возврат кредитору", color:"#DC2626", role:"supplier", actor:"supplier", phase:"create",
     actionHint:"УСКО вернул уступку: исправить документы и загрузить заново", whoActs:"👤 Кредитор"},
 ];
@@ -4321,8 +4634,9 @@ const ASSIGNMENT_TASKS = {
   debtor_scoring: [
     {id:"check_kr",          label:"Проверить кредитную историю (КР/БКИ)",   role:"analyst", required:true, durationMin:5,   icon:"📊"},
     {id:"check_legat",       label:"Проверить выписку Легат",                role:"analyst", required:true, durationMin:3,   icon:"📋"},
-    {id:"check_balance",     label:"Анализ баланса и ОПУ",                   role:"analyst", required:true, durationMin:10,  icon:"💼"},
-    {id:"set_debtor_limit",  label:"Установить лимит (объём) должнику",      role:"analyst", required:true, durationMin:2,   icon:"💰", isFinal:true, nextStage:"debtor_verified"},
+    {id:"check_balance",     label:"Проанализировать баланс должника",       role:"analyst", required:true, durationMin:5,   icon:"💼"},
+    {id:"check_pnl",         label:"Проанализировать ОПУ должника",          role:"analyst", required:true, durationMin:5,   icon:"📈"},
+    {id:"set_debtor_limit",  label:"Установить лимит должнику",              role:"analyst", required:true, durationMin:2,   icon:"💰", isFinal:true, nextStage:"debtor_verified"},
   ],
 
   // ─── Phase 1 ───
@@ -4330,7 +4644,7 @@ const ASSIGNMENT_TASKS = {
     {id:"check_dkp",         label:"Проверить ДКП (договор купли-продажи)",  role:"usko_prepare", required:true, durationMin:3, icon:"📄"},
     {id:"check_ttn",         label:"Проверить реестр ТТН за день",           role:"usko_prepare", required:true, durationMin:5, icon:"🚚"},
     {id:"check_eschf",       label:"Проверить ЭСЧФ (электронный счёт-фактура)", role:"usko_prepare", required:true, durationMin:2, icon:"🧾"},
-    {id:"verify_debtor_limit", label:"Сверить сумму с лимитом должника",     role:"usko_prepare", required:true, durationMin:1, icon:"⚖", isFinal:true,
+    {id:"verify_debtor_limit", label:"Проверить достаточность лимита должника", role:"usko_prepare", required:true, durationMin:1, icon:"⚖", isFinal:true,
      // smart routing: ≤50K → abs_card_creation, >50K → lpr_decision_assignment
      nextStage:"_smart_route_by_amount"},
   ],
@@ -4351,14 +4665,16 @@ const ASSIGNMENT_TASKS = {
 
   df_generation: [
     {id:"fetch_abs_data",    label:"Загрузить данные из АБС",                role:"usko_prepare", required:true, durationMin:1, icon:"📥"},
-    {id:"generate_df",       label:"Сгенерировать ДФ (1 страничка) + акт сверки", role:"usko_prepare", required:true, durationMin:1, icon:"📄"},
+    {id:"generate_df",       label:"Сгенерировать договор факторинга (ДФ)", role:"usko_prepare", required:true, durationMin:1, icon:"📄"},
+    {id:"generate_act",      label:"Сгенерировать акт сверки",               role:"usko_prepare", required:true, durationMin:1, icon:"📑"},
     {id:"send_to_signer",    label:"Передать подписанту банка",              role:"usko_prepare", required:true, durationMin:1, icon:"📤", isFinal:true, nextStage:"df_signing_bank"},
   ],
 
   df_signing_bank: [
     {id:"review_df",         label:"Проверить ДФ перед подписью",            role:"signer", required:true, durationMin:3,  icon:"👁"},
     {id:"review_act",        label:"Проверить акт сверки",                   role:"signer", required:true, durationMin:2,  icon:"👁"},
-    {id:"sign_both_ecp",     label:"Подписать оба документа ЭЦП (PIN)",      role:"signer", required:true, durationMin:1,  icon:"🔏", isFinal:true, nextStage:"df_signing_creditor"},
+    {id:"sign_df_ecp",       label:"Подписать ДФ ЭЦП банка",                 role:"signer", required:true, durationMin:1,  icon:"🔏"},
+    {id:"sign_act_ecp",      label:"Подписать акт сверки ЭЦП банка",         role:"signer", required:true, durationMin:1,  icon:"🔏", isFinal:true, nextStage:"df_signing_creditor"},
   ],
 
   // ─── Phase 3 — клиентские этапы (банк только мониторит) ───
@@ -4386,23 +4702,12 @@ const ASSIGNMENT_TASKS = {
 
   // ─── Phase 5 ───
   awaiting_debtor_payment: [
-    {id:"monitor_debtor",    label:"Мониторинг платежа от должника",         role:"credit_ops", required:false, durationMin:1, icon:"👀"},
-    {id:"send_reminder_due", label:"Напомнить должнику о сроке",             role:"credit_ops", required:false, durationMin:1, icon:"📧"},
-    {id:"confirm_payment",   label:"Должник оплатил (подтвердить вручную)",  role:"credit_ops", required:true, durationMin:1, icon:"✓", isFinal:true, nextStage:"assignment_closed"},
+    {id:"monitor_debtor",    label:"Проверить статус платежа в АБС",         role:"credit_ops", required:false, durationMin:1, icon:"👀"},
+    {id:"send_reminder_due", label:"Отправить напоминание должнику",         role:"credit_ops", required:false, durationMin:1, icon:"📧"},
+    {id:"confirm_payment",   label:"Подтвердить оплату от должника",         role:"credit_ops", required:true, durationMin:1, icon:"✓", isFinal:true, nextStage:"assignment_closed"},
   ],
 
-  debtor_overdue: [
-    {id:"send_claim_1",      label:"Отправить претензию #1",                 role:"credit_ops", required:false, durationMin:5, icon:"⚠"},
-    {id:"send_claim_2",      label:"Отправить претензию #2",                 role:"credit_ops", required:false, durationMin:5, icon:"⚠"},
-    {id:"send_final_claim",  label:"Финальная претензия с уведомлением",     role:"credit_ops", required:false, durationMin:5, icon:"⚠"},
-    {id:"escalate_to_legal", label:"Эскалировать в юр.отдел",                role:"credit_ops", required:true,  durationMin:2, icon:"⚖", isFinal:true, nextStage:"debtor_defaulted"},
-  ],
-
-  debtor_defaulted: [
-    {id:"prepare_court_docs", label:"Подготовить пакет документов для суда", role:"legal", required:true, durationMin:60, icon:"📑"},
-    {id:"file_court_case",   label:"Подать исковое заявление",               role:"legal", required:true, durationMin:30, icon:"⚖"},
-    {id:"recover_through_court", label:"Средства взысканы через суд",       role:"legal", required:true, durationMin:0,  icon:"💰", isFinal:true, nextStage:"assignment_closed"},
-  ],
+  // Просрочки и дефолты обрабатываются банком на своей стороне — задач для них нет в платформе.
 };
 
 // ─── Helper: получить задачи для уступки ───
@@ -4485,8 +4790,6 @@ const ASSIGNMENT_SLA_LIMITS = {
 
   // Phase 5: возврат
   awaiting_debtor_payment: {days:60, actor:"debtor"},   // стандартный срок факторинга — 60 дней
-  debtor_overdue: {days:14, actor:"bank"},              // 14 дней credit_ops до дефолта
-  debtor_defaulted: {days:90, actor:"bank"},            // 90 дней на судебное взыскание
   assignment_closed: {days:0, actor:"system"},          // финальный
 };
 
@@ -4542,7 +4845,7 @@ function canDebtorAcceptAssignment(company, amount) {
 function getDebtorActiveAssignments(debtorId, allAssignments) {
   return (allAssignments || []).filter(a =>
     a.debtorId === debtorId &&
-    !["assignment_closed", "debtor_defaulted"].includes(a.stage)
+    !["assignment_closed"].includes(a.stage)
   );
 }
 
@@ -4641,7 +4944,7 @@ function matchRepaymentToAssignment(payment, allAssignments, allCompanies) {
   // Кандидаты — активные уступки этого должника
   const candidates = (allAssignments || []).filter(a =>
     a.debtorId === debtor.id &&
-    ["awaiting_debtor_payment", "debtor_overdue", "payment_disbursed"].includes(a.stage)
+    ["awaiting_debtor_payment", "payment_disbursed"].includes(a.stage)
   );
   if (candidates.length === 0) return {match: null, confidence: 0, reason: "У должника нет активных уступок"};
 
@@ -4694,7 +4997,7 @@ function isAssignmentDebtorPaymentOverdue(asg) {
 // ─── Assignment lifecycle helpers for recover phase ───
 // isAssignmentPaidToClient — финансирование выдано клиенту (прошёл фазу pay)
 function isAssignmentPaidToClient(asg) {
-  return ["payment_disbursed", "awaiting_debtor_payment", "debtor_overdue", "debtor_defaulted", "assignment_closed"].includes(asg.stage);
+  return ["payment_disbursed", "awaiting_debtor_payment", "assignment_closed"].includes(asg.stage);
 }
 // isAssignmentFullyClosed — полностью закрыто (должник погасил)
 function isAssignmentFullyClosed(asg) {
@@ -4970,17 +5273,22 @@ function UnifiedTaskHub({tasks, onNavigate, currentUser}) {
 }
 
 function TaskHubRow({task, onNavigate}) {
+  // Для assignment_task используем emoji-иконку (task.icon — string), иначе Lucide-component
+  const isEmojiIcon = typeof task.icon === "string";
+  const IconComp = task.iconComponent || (isEmojiIcon ? null : task.icon);
   return <button onClick={()=>onNavigate(task)}
     className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50 transition-colors text-left group">
     <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
       style={{background: task.color + "15", color: task.color}}>
-      <task.icon size={14}/>
+      {isEmojiIcon ? <span className="text-base">{task.icon}</span> : (IconComp && <IconComp size={14}/>)}
     </div>
     <div className="flex-1 min-w-0">
       <div className="flex items-center gap-2 min-w-0">
-        <span className="mono text-[11px] font-bold" style={{color: task.color}}>{task.id}</span>
+        <span className="mono text-[11px] font-bold" style={{color: task.color}}>{task.assignmentId || task.id}</span>
         <span className="text-xs font-semibold truncate" style={{color: B.t1}}>{task.title}</span>
-        {task.priority === "high" && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{background: B.red}}/>}
+        {task.isCritical && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold shrink-0" style={{background: B.red + "15", color: B.red}}>🛡</span>}
+        {task.isFinal && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold shrink-0" style={{background: (task.stageColor || task.color) + "20", color: task.stageColor || task.color}}>⚡</span>}
+        {task.priority === "high" && !task.isCritical && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{background: B.red}}/>}
       </div>
       <div className="text-[10px] mt-0.5 flex items-center gap-1.5 flex-wrap" style={{color: B.t3}}>
         <span>{task.subtitle}</span>
@@ -4993,10 +5301,6 @@ function TaskHubRow({task, onNavigate}) {
       </div>
     </div>
     <div className="shrink-0 flex items-center gap-2">
-      <span className="text-[10px] font-semibold px-2 py-1 rounded hidden sm:block"
-        style={{background: task.color + "15", color: task.color}}>
-        {task.action}
-      </span>
       <ArrowRight size={14} className="opacity-40 group-hover:opacity-100 transition-opacity" style={{color: task.color}}/>
     </div>
   </button>;
@@ -5362,9 +5666,10 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
   const navigateToTask = (task) => {
     if (task.type === "pipeline") {
       onSelectReq(task.raw);
-    } else if (task.type === "assignment") {
+    } else if (task.type === "assignment_task" || task.type === "assignment") {
       if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("oborotka:nav", {detail: {page: "assignments", assignmentId: task.id}}));
+        const asgId = task.assignmentId || task.id;
+        window.dispatchEvent(new CustomEvent("oborotka:nav", {detail: {page: "assignments", assignmentId: asgId}}));
       }
     } else if (task.type === "document") {
       if (typeof window !== "undefined") {
@@ -5460,8 +5765,11 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
       const hero = sorted[0];
       if (!hero) return null;
 
-      const heroIcon = hero.type === "assignment" ? "📦" : hero.type === "pipeline" ? "⚡" : hero.type === "document" ? "📄" : "📋";
-      const heroAccent = hero.overdue ? B.red : hero.color;
+      const heroIcon = hero.type === "assignment_task" ? (hero.icon || "📦")
+        : hero.type === "assignment" ? "📦"
+        : hero.type === "pipeline" ? "⚡"
+        : hero.type === "document" ? "📄" : "📋";
+      const heroAccent = hero.overdue ? B.red : (hero.stageColor || hero.color);
 
       return <Card className="p-5 mb-5 relative overflow-hidden" style={{
         background: "linear-gradient(135deg, white 0%, " + heroAccent + "08 100%)",
@@ -5486,22 +5794,28 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
                 </span>}
               </div>
               <div className="text-base font-black" style={{color: B.t1}}>
-                {hero.action ? hero.action[0].toUpperCase() + hero.action.slice(1) : hero.subtitle}
-                {hero.amount && <span style={{color: heroAccent}}> · {fmtByn(hero.amount)}</span>}
+                {hero.title}
+                {hero.amount && <span style={{color: heroAccent, fontWeight: 700}}> · {fmtByn(hero.amount)}</span>}
               </div>
               <div className="text-[11px] mt-1" style={{color: B.t2}}>
-                <span className="font-mono font-bold">{hero.id}</span>
-                <span className="mx-1.5">·</span>
-                <span>{hero.title}</span>
-                {hero.subtitle && hero.subtitle !== (ASSIGNMENT_STAGES.find(s => s.id === hero.raw?.stage)?.label) && <>
+                {hero.assignmentId && <>
+                  <span className="font-mono font-bold">{hero.assignmentId}</span>
                   <span className="mx-1.5">·</span>
-                  <span>{hero.subtitle}</span>
                 </>}
+                {hero.stageLabel && <>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold" style={{background: hero.stageColor + "15", color: hero.stageColor}}>
+                    {hero.stageLabel}
+                  </span>
+                  <span className="mx-1.5">·</span>
+                </>}
+                <span>{hero.subtitle?.split(" · ")[2] || hero.subtitle}</span>
               </div>
               <div className="flex items-center gap-3 mt-2 text-[10px]" style={{color: B.t3}}>
                 {hero.days != null && <span>📅 {hero.days} {hero.days === 1 ? "день" : "дней"} на этапе</span>}
                 {hero.limit != null && hero.limit > 0 && <span>⏱ SLA {hero.limit}д</span>}
-                {hero.priority === "high" && <span style={{color: B.red}}>🔥 Высокий приоритет</span>}
+                {hero.durationMin > 0 && <span>~{hero.durationMin} мин на задачу</span>}
+                {hero.isCritical && <span style={{color: B.red, fontWeight: 700}}>🛡 Критическое действие</span>}
+                {hero.isFinal && <span style={{color: hero.stageColor || B.accent, fontWeight: 700}}>⚡ Финальная задача этапа</span>}
               </div>
             </div>
           </div>
@@ -5689,9 +6003,9 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
       currentUser={currentUser}
     />}
 
-    {/* ═══ Сегментация задач уступок по фазам (новый блок) ═══ */}
+    {/* ═══ Мои задачи по уступкам — сегментация по фазам ═══ */}
     {(() => {
-      const asgTasks = allMyTasks.filter(t => t.type === "assignment" && !["urgent"].includes(t.category));
+      const asgTasks = allMyTasks.filter(t => (t.type === "assignment_task") && !["urgent"].includes(t.category));
       if (asgTasks.length === 0) return null;
 
       // Группируем по фазам
@@ -5709,69 +6023,67 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
 
       return <div className="mb-5">
         <div className="flex items-center gap-2 mb-3">
-          <h2 className="text-base font-black" style={{color: B.t1}}>Задачи по уступкам — сегментация по фазам</h2>
+          <h2 className="text-base font-black" style={{color: B.t1}}>Мои задачи по уступкам</h2>
           <span className="text-[11px] px-2 py-0.5 rounded-full font-bold" style={{background: B.accentL, color: B.accent}}>
             {asgTasks.length}
           </span>
+          <span className="text-[10px]" style={{color: B.t3}}>
+            · сгруппированы по фазам конвейера
+          </span>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-3">
           {nonEmptyPhases.map(phase => {
             const phaseTasks = byPhase[phase.id];
-            return <Card key={phase.id} className="p-4">
-              <div className="flex items-center justify-between mb-3 pb-2 border-b" style={{borderColor: B.border}}>
+            return <Card key={phase.id} className="overflow-hidden">
+              <div className="px-4 py-2.5 flex items-center justify-between" style={{background: "#F8FAFC", borderBottom: `1px solid ${B.border}`}}>
                 <div className="flex items-center gap-2">
                   <span className="text-base">{phase.icon}</span>
-                  <div>
-                    <div className="text-xs font-bold" style={{color: B.t1}}>{phase.label}</div>
-                    <div className="text-[9px]" style={{color: B.t3}}>{phase.actorsInvolved}</div>
-                  </div>
+                  <span className="text-xs font-bold" style={{color: B.t1}}>{phase.label}</span>
+                  <span className="text-[10px]" style={{color: B.t3}}>· {phaseTasks.length} {phaseTasks.length === 1 ? "задача" : (phaseTasks.length >= 2 && phaseTasks.length <= 4) ? "задачи" : "задач"}</span>
                 </div>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold" style={{background: B.accentL, color: B.accent}}>
-                  {phaseTasks.length}
-                </span>
               </div>
-
-              <div className="space-y-1.5">
-                {phaseTasks.slice(0, 5).map(t => {
-                  const stageInfo = ASSIGNMENT_STAGES.find(s => s.id === t.raw?.stage);
-                  // Показываем сколько задач внутри этого этапа выполнено
-                  const stageTasks = ASSIGNMENT_TASKS[t.raw?.stage] || [];
-                  const completed = stageTasks.filter(st => t.raw?.completedTasks?.[st.id]).length;
-                  const totalReq = stageTasks.filter(st => st.required).length;
-
-                  return <button key={t.id} onClick={() => navigateToTask(t)}
-                    className="w-full text-left p-2.5 rounded-lg hover:shadow-sm transition-all"
-                    style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
-                    <div className="flex items-center justify-between gap-2 mb-1">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-[10px] mono font-bold" style={{color: B.t1}}>{t.id}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold" style={{background: stageInfo?.color + "15", color: stageInfo?.color}}>
-                          {stageInfo?.label || t.raw?.stage}
-                        </span>
-                        {t.overdue && <span className="text-[9px] px-1 py-0.5 rounded font-bold" style={{background: B.red, color: "white"}}>⚠ SLA</span>}
+              <div className="divide-y" style={{borderColor: B.border}}>
+                {phaseTasks.slice(0, 8).map(t => {
+                  return <div key={t.id} onClick={() => navigateToTask(t)}
+                    className="px-4 py-3 hover:bg-slate-50 cursor-pointer flex items-center justify-between gap-3"
+                    style={{borderColor: B.border}}>
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      {/* Icon — task icon */}
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-lg" style={{background: t.stageColor + "10"}}>
+                        {t.icon}
                       </div>
-                      <span className="text-[10px] mono font-bold shrink-0" style={{color: B.t1}}>
-                        {fmtByn(t.amount || 0)}
-                      </span>
+                      <div className="min-w-0 flex-1">
+                        {/* Task label */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-bold" style={{color: B.t1}}>{t.title}</span>
+                          {t.isCritical && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{background: B.red + "15", color: B.red}}>🛡 критическое</span>}
+                          {t.isFinal && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{background: t.stageColor + "20", color: t.stageColor}}>⚡ финальная</span>}
+                          {t.overdue && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold animate-pulse" style={{background: B.red, color: "white"}}>⚠ SLA</span>}
+                        </div>
+                        {/* Context */}
+                        <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                          <span className="mono font-bold">{t.assignmentId}</span>
+                          <span className="mx-1">·</span>
+                          <span>{t.stageLabel}</span>
+                          <span className="mx-1">·</span>
+                          <span>{t.subtitle?.split(" · ")[2] || ""}</span>
+                          {t.amount > 0 && <>
+                            <span className="mx-1">·</span>
+                            <span className="mono">{fmtByn(t.amount)}</span>
+                          </>}
+                          <span className="mx-1">·</span>
+                          <span>~{t.durationMin} мин</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-[10px] flex items-center justify-between" style={{color: B.t2}}>
-                      <span>👉 {t.action}</span>
-                      {totalReq > 0 && <span className="font-mono" style={{color: completed === totalReq ? B.green : B.t3}}>
-                        {completed}/{totalReq} задач
-                      </span>}
-                    </div>
-                    {/* Mini progress bar */}
-                    {totalReq > 0 && <div className="h-1 rounded-full overflow-hidden mt-1.5" style={{background: "#E2E8F0"}}>
-                      <div className="h-full transition-all" style={{
-                        width: `${(completed / totalReq) * 100}%`,
-                        background: completed === totalReq ? B.green : (stageInfo?.color || B.accent),
-                      }}/>
-                    </div>}
-                  </button>;
+                    <Btn size="sm" variant={t.isFinal ? "primary" : "ghost"} icon={ArrowRight}>
+                      Открыть
+                    </Btn>
+                  </div>;
                 })}
-                {phaseTasks.length > 5 && <div className="text-[10px] text-center pt-1" style={{color: B.t3}}>
-                  ...и ещё {phaseTasks.length - 5}
+                {phaseTasks.length > 8 && <div className="px-4 py-2 text-[10px] text-center" style={{color: B.t3}}>
+                  ...и ещё {phaseTasks.length - 8} {phaseTasks.length - 8 === 1 ? "задача" : "задач"} в этой фазе
                 </div>}
               </div>
             </Card>;
@@ -5786,7 +6098,7 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
       // Все остальные задачи (не приоритетные, не уступки — их показываем в фазовой сегментации выше)
       const tableTasks = allMyTasks.filter(t =>
         !["urgent", "urgent_sign", "expiring"].includes(t.category) &&
-        t.type !== "assignment"
+        t.type !== "assignment_task" && t.type !== "assignment"
       );
       if (tableTasks.length === 0) return null;
       return <div className="mb-5">
@@ -5917,7 +6229,7 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
           </div>}
           {(() => {
             const totalMinutes = allMyTasks.reduce((sum, t) => {
-              if (t.type === "assignment" && t.raw?.stage) {
+              if ((t.type === "assignment_task") && t.raw?.stage) {
                 const stageTasks = ASSIGNMENT_TASKS[t.raw.stage] || [];
                 return sum + stageTasks.filter(st => st.required).reduce((s, st) => s + (st.durationMin || 0), 0);
               }
@@ -9632,7 +9944,6 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
             const waitingClient = isAssignmentWaitingClient(a);
             const isClosed = a.stage === "assignment_closed"; // fully closed cycle
             const isPaidToClient = a.stage === "payment_disbursed"; // paid to client, awaiting debtor
-            const isDebtorOverdue = a.stage === "debtor_overdue" || a.stage === "debtor_defaulted";
             const isChecked = selectedIds?.includes(a.id);
 
             return <tr key={a.id}
@@ -9640,12 +9951,12 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
               className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
               style={{
                 borderColor: B.border,
-                background: isDebtorOverdue ? "#FEE2E2" : bankOver ? "#FEF2F2" : isClosed ? "#F0FDF4" : isPaidToClient ? "#EEF2FF" : isChecked ? B.accentL + "30" : "white"
+                background: bankOver ? "#FEF2F2" : isClosed ? "#F0FDF4" : isPaidToClient ? "#EEF2FF" : isChecked ? B.accentL + "30" : "white"
               }}>
               {batchMode && <td className="px-2 py-2 text-center">
                 <input type="checkbox" checked={isChecked} onChange={()=>toggleSelect(a.id)} onClick={e=>e.stopPropagation()} className="cursor-pointer"/>
               </td>}
-              <td className="px-3 py-2 mono font-semibold" style={{color: isClosed ? B.green : isDebtorOverdue ? B.red : B.accent}}>{a.id}</td>
+              <td className="px-3 py-2 mono font-semibold" style={{color: isClosed ? B.green : B.accent}}>{a.id}</td>
               <td className="px-3 py-2 mono text-[10px]" style={{color: B.t3}}>{a.dealId}</td>
               <td className="px-3 py-2 truncate max-w-[180px]" style={{color: B.t1}}>{supplier?.name || "—"}</td>
               <td className="px-3 py-2 truncate max-w-[180px]" style={{color: B.t2}}>{debtor?.name || "—"}</td>
@@ -9666,9 +9977,6 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
                 {isClosed ? <span className="text-[10px]" style={{color: B.green}}>✓ Закрыта</span>
                   : a.stage === "awaiting_debtor_payment" && a.dueDate ? <span className="text-[10px] mono" style={{color: "#6366F1"}}>
                       до {a.dueDate.slice(5)}
-                    </span>
-                  : a.stage === "debtor_overdue" ? <span className="text-[10px] font-bold" style={{color: B.red}}>
-                      +{a.overdueDays || 0}д
                     </span>
                   : <div className="inline-flex items-center gap-1.5">
                     <span className="mono font-bold text-[11px]" style={{color: bankOver ? B.orange : (waitingClient && sla.overdue) ? B.red : B.t2}}>
@@ -9704,7 +10012,6 @@ function AssignmentPhaseWorkflow({asg, compact=false}) {
   const phaseIdx = ASSIGNMENT_PHASES.findIndex(p => p.id === currentPhase);
   const isReturned = asg.stage === "returned_to_creditor";
   const isFullyClosed = asg.stage === "assignment_closed";
-  const isDebtorIssue = asg.stage === "debtor_overdue" || asg.stage === "debtor_defaulted";
 
   if (isReturned) {
     return <Card className="p-3 mb-4" style={{background: B.redL, borderColor: "#FECACA", borderWidth: 2}}>
@@ -9724,7 +10031,6 @@ function AssignmentPhaseWorkflow({asg, compact=false}) {
         // Recover phase gets special color treatment
         let color;
         if (isDone) color = B.green;
-        else if (isCurrent && isDebtorIssue) color = B.red;
         else if (isCurrent && phase.id === "recover") color = "#6366F1";
         else if (isCurrent) color = B.accent;
         else color = B.border;
@@ -10052,7 +10358,7 @@ function AssignmentStepper({asg}) {
   if (!asg) return null;
   // Берём все этапы кроме особых веток
   const linearStages = ASSIGNMENT_STAGES.filter(s =>
-    !["debtor_overdue", "debtor_defaulted", "returned_to_creditor"].includes(s.id)
+    !["returned_to_creditor"].includes(s.id)
   );
   const currentIdx = linearStages.findIndex(s => s.id === asg.stage);
   const isOnSpecialBranch = currentIdx === -1;
@@ -10341,43 +10647,118 @@ function ClientActivityCard({asg, setToast}) {
 // Каждая задача = чекбокс + действие. Когда все required+isFinal выполнены → stage advance.
 // ═══════════════════════════════════════════════════════════
 function StageTasksPanel({asg, currentUser, onAction, onTaskComplete, setToast}) {
-  const tasks = getAssignmentTasks(asg);
-  if (!tasks || tasks.length === 0) return null;
+  const allStageTasks = getAssignmentTasks(asg);
+  const [confirmModal, setConfirmModal] = useState(null); // {task, ...}
+  const [executing, setExecuting] = useState(null); // taskId
+  if (!allStageTasks || allStageTasks.length === 0) return null;
 
   const completedTasks = asg.completedTasks || {};
   const stage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
 
+  // ─── Фильтрация задач по роли пользователя ───
+  // Банк-кабинет показывает ТОЛЬКО задачи банковских ролей.
+  // Клиентские задачи (supplier, debtor) выполняются в кабинете юр.лица — банк их не видит.
+  const BANK_ROLES = new Set(["analyst", "lpr", "usko_prepare", "signer", "credit_ops", "legal", "admin", "system"]);
+  const isClientRole = (role) => !BANK_ROLES.has(role);
+
+  // Задачи банка — все non-client задачи
+  const bankTasks = allStageTasks.filter(t => !isClientRole(t.role));
+  // Задачи моей роли (или admin видит всё банковское)
+  const myRoleTasks = bankTasks.filter(t => t.role === currentUser.role || currentUser.role === "admin");
+
+  // Если на этапе задачи только клиентские — банк не показывает чек-лист (это кабинет юр.лица)
+  if (bankTasks.length === 0) return null;
+
+  // Если у текущего пользователя нет задач на этом этапе — показываем мониторинг
+  if (myRoleTasks.length === 0) {
+    const otherBankRoles = [...new Set(bankTasks.map(t => ROLE_ACCESS[t.role]?.label || t.role))];
+    return <Card className="p-4 mb-4" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+      <div className="flex items-start gap-3">
+        <span className="text-base shrink-0">⏳</span>
+        <div className="flex-1">
+          <div className="text-xs font-bold mb-0.5" style={{color: B.t1}}>На этом этапе работает: {otherBankRoles.join(", ")}</div>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            Ваше участие на этапе «{stage?.label}» не требуется. Вы можете отслеживать прогресс по StageMonitoringCard ниже.
+          </div>
+        </div>
+      </div>
+    </Card>;
+  }
+
+  // Используем только мои задачи
+  const tasks = myRoleTasks;
   const completedCount = tasks.filter(t => completedTasks[t.id]).length;
   const totalCount = tasks.filter(t => t.required).length;
   const progressPercent = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
 
-  const handleTaskClick = (task) => {
-    if (completedTasks[task.id]) return; // уже выполнено
-    if (task.role !== currentUser.role && currentUser.role !== "admin") {
-      setToast && setToast({msg: `Эта задача для роли ${task.role}`, type: "warning"});
-      return;
+  // ─── Sequential lock: нужно выполнить required задачи ПО ПОРЯДКУ ───
+  // Финальная задача (isFinal) разблокируется ТОЛЬКО когда все остальные required выполнены.
+  const isTaskBlocked = (task, idx) => {
+    if (completedTasks[task.id]) return false; // уже сделана
+    // Финальная — разблокируется только когда все required-non-final выполнены
+    if (task.isFinal) {
+      const requiredBefore = tasks.filter(t => t.required && !t.isFinal && !completedTasks[t.id]);
+      if (requiredBefore.length > 0) return {reason: "Сначала выполните все обязательные задачи выше", waitingFor: requiredBefore.length};
     }
-    if (task.isClientAction) {
-      // Mock-кнопка для клиентских действий (демо)
-      const nextStage = resolveNextStage(asg, task);
-      onAction && onAction(nextStage, {
-        completedTasks: {...completedTasks, [task.id]: {at: new Date().toISOString().slice(0, 19).replace("T", " "), by: "Client (mock)"}},
-      }, `Клиент выполнил: ${task.label}`);
-      return;
-    }
+    // Обычная required — разблокирована
+    return false;
+  };
 
-    // Mark task done
+  // Найдём «следующую задачу» — первую невыполненную required не-blocked
+  const nextActionableTask = tasks.find(t => {
+    if (completedTasks[t.id]) return false;
+    if (!t.required && !t.isFinal) return false;
+    if (isTaskBlocked(t, 0)) return false;
+    return true;
+  });
+
+  // ─── Критические задачи требуют подтверждения ───
+  const CRITICAL_TASK_IDS = new Set([
+    "set_debtor_limit",        // установка лимита должнику
+    "sign_decision",           // подпись решения ЛПР ЭЦП
+    "sign_df_ecp","sign_act_ecp",           // подпись ДФ + акта ЭЦП банка
+    "send_to_abs",             // распоряжение в АБС (выдача денег!)
+    "confirm_disbursement",    // подтверждение выдачи финансирования
+    "confirm_payment",         // подтверждение что должник оплатил
+  ]);
+  const isCriticalTask = (task) => CRITICAL_TASK_IDS.has(task.id);
+
+  const executeTask = (task) => {
+    if (executing) return; // double-click protection
+    setExecuting(task.id);
+
     const newCompleted = {...completedTasks, [task.id]: {at: new Date().toISOString().slice(0, 19).replace("T", " "), by: currentUser.name}};
 
-    if (task.isFinal) {
-      // Финальная задача — двигаем stage вперёд
-      const nextStage = resolveNextStage(asg, task);
-      onAction && onAction(nextStage, {completedTasks: newCompleted}, `Этап «${stage?.label}» завершён → ${ASSIGNMENT_STAGES.find(s => s.id === nextStage)?.label || nextStage}`);
-    } else {
-      // Обычная задача — просто отмечаем выполнение
-      onTaskComplete && onTaskComplete(task.id, newCompleted);
-      setToast && setToast({msg: `✓ ${task.label}`, type: "success"});
+    setTimeout(() => {
+      if (task.isClientAction) {
+        const nextStage = resolveNextStage(asg, task);
+        onAction && onAction(nextStage, {
+          completedTasks: {...completedTasks, [task.id]: {at: new Date().toISOString().slice(0, 19).replace("T", " "), by: "Client (mock)"}},
+        }, `Клиент выполнил: ${task.label}`);
+      } else if (task.isFinal) {
+        const nextStage = resolveNextStage(asg, task);
+        onAction && onAction(nextStage, {completedTasks: newCompleted}, `Этап «${stage?.label}» завершён → ${ASSIGNMENT_STAGES.find(s => s.id === nextStage)?.label || nextStage}`);
+      } else {
+        onTaskComplete && onTaskComplete(task.id, newCompleted);
+        setToast && setToast({msg: `✓ ${task.label}`, type: "success"});
+      }
+      setExecuting(null);
+    }, 600); // имитация серверного ответа
+  };
+
+  const handleTaskClick = (task) => {
+    if (completedTasks[task.id]) return; // уже выполнено
+    const blocked = isTaskBlocked(task, tasks.indexOf(task));
+    if (blocked) {
+      setToast && setToast({msg: `🔒 Заблокировано: ${blocked.reason}`, type: "warning"});
+      return;
     }
+    // Критические задачи — через confirmation modal
+    if (isCriticalTask(task)) {
+      setConfirmModal({task});
+      return;
+    }
+    executeTask(task);
   };
 
   return <Card className="p-5 mb-4" style={{borderColor: stage?.color || B.accent, borderWidth: 2, background: (stage?.color || B.accent) + "06"}}>
@@ -10396,7 +10777,7 @@ function StageTasksPanel({asg, currentUser, onAction, onTaskComplete, setToast})
             Задачи на этом этапе ({completedCount}/{totalCount})
           </div>
           <div className="text-[10px] mt-1" style={{color: B.t3}}>
-            Выполняйте задачи по порядку. Финальная задача ✓ переведёт уступку на следующий этап.
+            🔒 Выполняйте задачи строго по порядку. Финальная разблокируется только после всех остальных.
           </div>
         </div>
       </div>
@@ -10416,74 +10797,322 @@ function StageTasksPanel({asg, currentUser, onAction, onTaskComplete, setToast})
       }}/>
     </div>
 
+    {/* «Следующий шаг» highlight */}
+    {nextActionableTask && <div className="mb-3 p-2.5 rounded-lg flex items-center gap-2" style={{
+      background: (stage?.color || B.accent) + "10",
+      border: `1px solid ${stage?.color || B.accent}40`,
+    }}>
+      <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 animate-pulse" style={{background: stage?.color || B.accent}}>
+        <span style={{color: "white", fontSize: 11, fontWeight: 900}}>→</span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: stage?.color || B.accent}}>
+          Следующий шаг для вас
+        </div>
+        <div className="text-xs font-bold" style={{color: B.t1}}>
+          {nextActionableTask.icon} {nextActionableTask.label}
+        </div>
+      </div>
+    </div>}
+
     {/* Tasks list */}
     <div className="space-y-1.5">
       {tasks.map((task, idx) => {
         const done = !!completedTasks[task.id];
         const completion = completedTasks[task.id];
-        const isMyTask = task.role === currentUser.role || currentUser.role === "admin";
-        const canExecute = !done && isMyTask;
+        // Все задачи теперь — мои (отфильтровано выше)
+        const blocked = isTaskBlocked(task, idx);
+        const canExecute = !done && !blocked;
         const isOptional = !task.required;
         const isFinal = task.isFinal;
+        const isCritical = isCriticalTask(task);
+        const isNext = nextActionableTask?.id === task.id;
+        const isLoading = executing === task.id;
+
+        // Цветовые состояния
+        let bgColor, borderColor, borderWidth;
+        if (done) {
+          bgColor = B.greenL;
+          borderColor = B.green + "40";
+          borderWidth = 1;
+        } else if (blocked) {
+          bgColor = "#F8FAFC";
+          borderColor = B.border;
+          borderWidth = 1;
+        } else if (isNext && isFinal) {
+          // СЛЕДУЮЩАЯ финальная задача — самый яркий вид
+          bgColor = (stage?.color || B.accent) + "10";
+          borderColor = stage?.color || B.accent;
+          borderWidth = 2;
+        } else if (isNext) {
+          // Просто следующая в очереди
+          bgColor = "white";
+          borderColor = (stage?.color || B.accent) + "60";
+          borderWidth = 2;
+        } else if (isFinal) {
+          bgColor = "white";
+          borderColor = (stage?.color || B.accent) + "30";
+          borderWidth = 1;
+        } else {
+          bgColor = "white";
+          borderColor = B.border;
+          borderWidth = 1;
+        }
 
         return <div key={task.id}
-          className={`p-3 rounded-lg transition-all ${canExecute ? "cursor-pointer hover:shadow-sm" : ""}`}
+          id={`task-${task.id}`}
+          className={`p-3 rounded-lg transition-all relative ${canExecute ? "cursor-pointer hover:shadow-sm" : ""} ${isNext && canExecute ? "ring-2 ring-offset-1" : ""}`}
           onClick={canExecute ? () => handleTaskClick(task) : undefined}
           style={{
-            background: done ? B.greenL : isMyTask ? "white" : "#F8FAFC",
-            border: `1px solid ${done ? B.green + "40" : isFinal && canExecute ? (stage?.color || B.accent) + "60" : B.border}`,
-            opacity: !isMyTask && !done ? 0.6 : 1,
+            background: bgColor,
+            border: `${borderWidth}px solid ${borderColor}`,
+            opacity: blocked ? 0.7 : 1,
+            ringColor: isNext && canExecute ? (stage?.color || B.accent) + "40" : undefined,
           }}>
+          {/* «Следующая задача» indicator */}
+          {isNext && canExecute && <div className="absolute -left-1 top-1/2 -translate-y-1/2 -translate-x-full px-1.5 py-0.5 rounded-l text-[9px] font-bold whitespace-nowrap animate-pulse"
+            style={{background: stage?.color || B.accent, color: "white"}}>
+            👉 СЕЙЧАС
+          </div>}
+
           <div className="flex items-start gap-3">
             {/* Checkbox / status */}
             <div className="shrink-0 mt-0.5">
               {done ? <div className="w-5 h-5 rounded-full flex items-center justify-center" style={{background: B.green}}>
                 <span className="text-white text-[10px] font-bold">✓</span>
+              </div> : isLoading ? <div className="w-5 h-5 rounded-full flex items-center justify-center" style={{background: stage?.color || B.accent}}>
+                <Loader2 size={11} className="animate-spin" style={{color: "white"}}/>
+              </div> : blocked ? <div className="w-5 h-5 rounded-full flex items-center justify-center" style={{background: "#F1F5F9"}}>
+                <span className="text-[10px]">🔒</span>
               </div> : <div className="w-5 h-5 rounded-full border-2"
-                style={{borderColor: isMyTask ? (stage?.color || B.accent) : B.border}}/>}
+                style={{borderColor: isNext ? (stage?.color || B.accent) : (stage?.color || B.accent) + "60"}}/>}
             </div>
 
             {/* Content */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-sm">{task.icon}</span>
-                <span className="text-xs font-bold" style={{color: done ? B.t3 : B.t1, textDecoration: done ? "line-through" : "none"}}>
+                <span className="text-xs font-bold" style={{color: done ? B.t3 : blocked ? B.t3 : B.t1, textDecoration: done ? "line-through" : "none"}}>
                   {idx + 1}. {task.label}
                 </span>
                 {isOptional && !done && <span className="text-[9px] px-1.5 py-0.5 rounded" style={{background: B.t3 + "15", color: B.t3}}>опционально</span>}
-                {isFinal && !done && <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold" style={{background: (stage?.color || B.accent) + "20", color: stage?.color || B.accent}}>
-                  ⚡ переводит на следующий этап
+                {isCritical && !done && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{background: B.red + "15", color: B.red}}>
+                  🛡 критическое
+                </span>}
+                {isFinal && !done && !blocked && <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold" style={{background: (stage?.color || B.accent) + "20", color: stage?.color || B.accent}}>
+                  ⚡ финальная
+                </span>}
+                {blocked && <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold" style={{background: B.t3 + "15", color: B.t3}}>
+                  🔒 заблокировано
                 </span>}
               </div>
               <div className="flex items-center gap-2 mt-1 text-[10px]" style={{color: B.t3}}>
-                <span>👤 {ROLE_ACCESS[task.role]?.label || task.role}</span>
-                {task.durationMin > 0 && <>
-                  <span>·</span>
-                  <span>~{task.durationMin} мин</span>
+                {task.durationMin > 0 && <span>~{task.durationMin} мин</span>}
+                {blocked && <>
+                  {task.durationMin > 0 && <span>·</span>}
+                  <span style={{color: B.yellow}}>⏳ ждёт {blocked.waitingFor} {blocked.waitingFor === 1 ? "задачу" : "задач"} выше</span>
                 </>}
                 {done && completion && <>
-                  <span>·</span>
+                  {task.durationMin > 0 && <span>·</span>}
                   <span style={{color: B.green}}>✓ {completion.at} · {completion.by}</span>
                 </>}
               </div>
             </div>
 
             {/* Action button */}
-            {canExecute && <Btn size="sm"
-              variant={isFinal ? "primary" : "ghost"}
+            {canExecute && !isLoading && <Btn size="sm"
+              variant={isFinal && isNext ? "primary" : "ghost"}
               onClick={(e) => { e.stopPropagation(); handleTaskClick(task); }}>
-              {isFinal ? "Завершить этап" : "Выполнить"}
+              {isCritical ? "🛡 Подтвердить и выполнить" : "Выполнить"}
+            </Btn>}
+            {isLoading && <Btn size="sm" variant="ghost" disabled>
+              <Loader2 size={12} className="animate-spin"/> Выполнение...
             </Btn>}
           </div>
         </div>;
       })}
     </div>
 
+    {/* Confirmation modal для критических задач */}
+    {confirmModal && <CriticalTaskConfirmModal
+      task={confirmModal.task}
+      asg={asg}
+      currentUser={currentUser}
+      onCancel={() => setConfirmModal(null)}
+      onConfirm={() => {
+        const t = confirmModal.task;
+        setConfirmModal(null);
+        executeTask(t);
+      }}/>}
+
     {progressPercent === 100 && <div className="mt-3 p-2.5 rounded-lg text-[11px] font-semibold flex items-center gap-2" style={{background: B.greenL, color: B.green}}>
       <CheckCircle size={14}/>
       Все задачи этапа выполнены — уступка переведена на следующий этап
     </div>}
   </Card>;
+}
+
+// ═══════════════════════════════════════════════════════════
+// CriticalTaskConfirmModal — подтверждение перед критическим действием
+// Блокирует случайное выполнение: подпись ЭЦП, выдача денег, эскалация в суд.
+// Требует: чекбокс «я проверил» + ввод PIN/комментария + явный клик подтверждения.
+// ═══════════════════════════════════════════════════════════
+function CriticalTaskConfirmModal({task, asg, currentUser, onCancel, onConfirm}) {
+  const [reviewed, setReviewed] = useState(false);
+  const [pin, setPin] = useState("");
+  const [understood, setUnderstood] = useState(false);
+
+  // Конфигурация для разных типов критических задач
+  const taskMeta = {
+    set_debtor_limit: {
+      title: "Установка лимита должнику",
+      icon: "💰",
+      color: "#7C3AED",
+      severity: "high",
+      consequence: "После установки кредитор сможет создавать уступки на этого должника. Лимит влияет на риск-капитал банка.",
+      requiresPin: false,
+      reviewLabel: "Я провёл скоринг, проверил БКИ и Легат, лимит соответствует риск-классу",
+    },
+    sign_decision: {
+      title: "Подпись решения ЛПР ЭЦП",
+      icon: "🔏",
+      color: "#6366F1",
+      severity: "high",
+      consequence: "Compliance-решение по ст. 121 БК РБ. Будет приложено к договору факторинга.",
+      requiresPin: true,
+      reviewLabel: "Я проверил compliance-факторы и уверен в решении",
+    },
+    sign_df_ecp: {
+      title: "Подпись ДФ ЭЦП банка",
+      icon: "🔏",
+      color: "#06B6D4",
+      severity: "high",
+      consequence: "Банк юридически связывается обязательством выкупить требование по ДФ. Отозвать подпись после ЭЦП невозможно.",
+      requiresPin: true,
+      reviewLabel: "Я проверил договор факторинга: реквизиты сторон, сумму, срок",
+    },
+    sign_act_ecp: {
+      title: "Подпись акта сверки ЭЦП банка",
+      icon: "🔏",
+      color: "#06B6D4",
+      severity: "high",
+      consequence: "Подтверждается переход прав требования по конкретной поставке. Завершает фазу подписи банка.",
+      requiresPin: true,
+      reviewLabel: "Я проверил акт сверки: соответствие ТТН, сумму уступаемого требования",
+    },
+    send_to_abs: {
+      title: "Отправить распоряжение на выдачу в АБС",
+      icon: "💸",
+      color: "#EA580C",
+      severity: "critical",
+      consequence: `Будет инициирована выдача ${fmtByn(asg.toReceive || 0)} с транзитного счёта на счёт кредитора. ОТМЕНИТЬ НЕЛЬЗЯ после отправки.`,
+      requiresPin: false,
+      reviewLabel: "Я проверил реквизиты получателя, сумму и наличие всех 5 подписей ЭЦП",
+    },
+    confirm_disbursement: {
+      title: "Подтвердить выдачу финансирования",
+      icon: "✅",
+      color: "#059669",
+      severity: "high",
+      consequence: "Уступка перейдёт в режим ожидания платежа от должника (60 дней). Это финал процесса выдачи.",
+      requiresPin: false,
+      reviewLabel: "Я проверил в АБС что деньги ушли на счёт кредитора",
+    },
+    confirm_payment: {
+      title: "Подтвердить оплату от должника",
+      icon: "💚",
+      color: "#059669",
+      severity: "medium",
+      consequence: "Уступка будет закрыта. Лимит должника восстановится.",
+      requiresPin: false,
+      reviewLabel: "Я подтверждаю что должник перечислил полную сумму",
+    },
+  };
+
+  const meta = taskMeta[task.id] || {
+    title: task.label,
+    icon: task.icon || "🛡",
+    color: B.t1,
+    severity: "medium",
+    consequence: "Это критическое действие. Убедитесь что вы готовы.",
+    requiresPin: false,
+    reviewLabel: "Я проверил всё необходимое",
+  };
+
+  const canConfirm = reviewed && understood && (!meta.requiresPin || pin.length === 4);
+
+  return <Modal open={true} onClose={onCancel} title={`🛡 Подтверждение: ${meta.title}`}>
+    <div className="space-y-4">
+      {/* Severity banner */}
+      <div className="p-3 rounded-lg flex items-start gap-3" style={{
+        background: meta.severity === "critical" ? B.redL : meta.severity === "high" ? B.yellowL : "#F0F9FF",
+        border: `1px solid ${meta.severity === "critical" ? B.red : meta.severity === "high" ? B.yellow : B.accent}30`,
+      }}>
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl shrink-0" style={{background: "white"}}>
+          {meta.icon}
+        </div>
+        <div>
+          <div className="text-xs font-black uppercase tracking-wider mb-1" style={{
+            color: meta.severity === "critical" ? B.red : meta.severity === "high" ? B.yellow : B.accent,
+          }}>
+            {meta.severity === "critical" ? "⚠ Критическое действие" : meta.severity === "high" ? "🛡 Важное действие" : "Подтверждение"}
+          </div>
+          <div className="text-xs font-bold" style={{color: B.t1}}>{meta.title}</div>
+          <div className="text-[11px] mt-1" style={{color: B.t2}}>{meta.consequence}</div>
+        </div>
+      </div>
+
+      {/* Контекст */}
+      <div className="p-3 rounded-lg text-[11px]" style={{background: "#F8FAFC", color: B.t2}}>
+        <div className="font-bold mb-1" style={{color: B.t1}}>Уступка</div>
+        <div>{asg.id} {asg.dfNumber && `· ${asg.dfNumber}`}</div>
+        <div className="mt-0.5">{fmtByn(asg.amount || 0)} {asg.toReceive && <span style={{color: B.green}}>· к выплате {fmtByn(asg.toReceive)}</span>}</div>
+      </div>
+
+      {/* Шаг 1: review checkbox */}
+      <label className="flex items-start gap-2.5 p-3 rounded-lg cursor-pointer hover:bg-slate-50"
+        style={{background: reviewed ? B.greenL : "white", border: `1px solid ${reviewed ? B.green + "40" : B.border}`}}>
+        <input type="checkbox" checked={reviewed} onChange={e => setReviewed(e.target.checked)} className="mt-0.5"/>
+        <div className="text-[11px]" style={{color: B.t1}}>
+          <strong>Шаг 1.</strong> {meta.reviewLabel}
+        </div>
+      </label>
+
+      {/* Шаг 2: понимание последствий */}
+      <label className="flex items-start gap-2.5 p-3 rounded-lg cursor-pointer hover:bg-slate-50"
+        style={{background: understood ? B.greenL : "white", border: `1px solid ${understood ? B.green + "40" : B.border}`}}>
+        <input type="checkbox" checked={understood} onChange={e => setUnderstood(e.target.checked)} className="mt-0.5"/>
+        <div className="text-[11px]" style={{color: B.t1}}>
+          <strong>Шаг 2.</strong> Я понимаю последствия и готов выполнить действие. Действую от имени банка как уполномоченный сотрудник <strong>{currentUser.name}</strong>.
+        </div>
+      </label>
+
+      {/* Шаг 3: PIN (только для ЭЦП) */}
+      {meta.requiresPin && <div className="p-3 rounded-lg" style={{background: pin.length === 4 ? B.greenL : "white", border: `1px solid ${pin.length === 4 ? B.green + "40" : B.border}`}}>
+        <div className="text-[11px] mb-2" style={{color: B.t1}}>
+          <strong>Шаг 3.</strong> Введите PIN от ЭЦП ГосСУОК (4 цифры)
+        </div>
+        <input type="password" inputMode="numeric" pattern="[0-9]*" maxLength={4}
+          value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+          placeholder="● ● ● ●"
+          className="w-full px-3 py-2 text-center text-lg tracking-widest mono rounded-lg border"
+          style={{borderColor: pin.length === 4 ? B.green : B.border, color: B.t1}}/>
+        <div className="text-[10px] mt-1" style={{color: B.t3}}>В прототипе подойдёт любые 4 цифры</div>
+      </div>}
+
+      {/* Footer */}
+      <div className="flex justify-between items-center pt-3 border-t" style={{borderColor: B.border}}>
+        <Btn variant="ghost" onClick={onCancel}>Отмена</Btn>
+        <Btn variant="primary"
+          disabled={!canConfirm}
+          icon={canConfirm ? CheckCircle : null}
+          onClick={onConfirm}
+          style={canConfirm ? {background: meta.color} : {}}>
+          {canConfirm ? `${meta.icon} Подтвердить и выполнить` : "Заполните все поля выше"}
+        </Btn>
+      </div>
+    </div>
+  </Modal>;
 }
 
 // Assignment action block (role-specific task on assignment)
@@ -10512,7 +11141,6 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
   const [returnToUskoComment, setReturnToUskoComment] = useState("");
   const [paymentVerified, setPaymentVerified] = useState(false);
   const [paymentDangerModal, setPaymentDangerModal] = useState(false);
-  const [escalateLegalModal, setEscalateLegalModal] = useState(false);
   let secondaryAction = null;
 
   // Final / non-actionable state
@@ -10776,35 +11404,6 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       icon: Mail,
       onClick: () => setToast && setToast({msg: "Напоминание отправлено должнику", type: "success"}),
     };
-  } else if (asg.stage === "debtor_overdue") {
-    // Credit ops works overdue — can send reminder / escalate to default
-    primaryAction = {
-      label: signing ? "Отправка..." : "📧 Отправить претензию",
-      icon: signing ? Loader2 : Mail,
-      disabled: signing,
-      onClick: () => {
-        const newReminders = (asg.remindersSent || 0) + 1;
-        doAdvance("debtor_overdue", {remindersSent: newReminders}, `Претензия #${newReminders} отправлена должнику`);
-      },
-    };
-    secondaryAction = {
-      label: "⚖️ Передать юр.отделу",
-      icon: AlertTriangle,
-      onClick: () => setEscalateLegalModal(true),
-    };
-  } else if (asg.stage === "debtor_defaulted") {
-    // Legal team — mark as recovered (won) or written off (lost)
-    primaryAction = {
-      label: signing ? "..." : "✓ Средства взысканы судом",
-      icon: signing ? Loader2 : CheckCircle,
-      disabled: signing,
-      onClick: () => doAdvance("assignment_closed", {debtorPaidDate: "2026-03-26", recoveredThroughCourt: true}, "Средства взысканы через суд. Уступка закрыта"),
-    };
-    secondaryAction = {
-      label: "Списать как безнадёжная",
-      icon: XCircle,
-      onClick: () => setToast && setToast({msg: "Операция недоступна в прототипе", type: "info"}),
-    };
   }
 
   // Payment confirmation (triggered from modal): payment_authorization → payment_disbursed
@@ -10820,8 +11419,9 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
   };
 
   return <>
-    {/* ═══ Если у этапа есть определённые задачи — показываем StageTasksPanel ═══ */}
-    {ASSIGNMENT_TASKS[asg.stage] && <StageTasksPanel
+    {/* ═══ Если этап содержит задачи И юзер может действовать — показываем StageTasksPanel ═══ */}
+    {/* Если canAct=false → ниже отрабатывает return со StageMonitoringCard / ClientActivityCard. */}
+    {canAct && ASSIGNMENT_TASKS[asg.stage] && <StageTasksPanel
       asg={asg}
       currentUser={currentUser}
       onAction={onAction}
@@ -10837,7 +11437,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-base">{phase?.icon || "📦"}</span>
           <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: stage?.color || B.accent}}>
-            Контекст для выполнения задач
+            Детали уступки
           </div>
           <span className="text-[10px]" style={{color: overdue ? B.red : B.t3}}>
             · {slaText}
@@ -11539,7 +12139,9 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       </Collapsible>
 
       {/* ─── Footer: primary action — крупная sticky-like кнопка ─── */}
-      <div className="pt-4 mt-2 border-t-2" style={{borderColor: stage?.color ? stage.color + "30" : B.border}}>
+      {/* ВАЖНО: Если у этапа есть чек-лист задач (ASSIGNMENT_TASKS) — скрываем дублирующую кнопку. */}
+      {/* Все действия выполняются через атомарные задачи в StageTasksPanel выше — принцип "одна задача = одно действие". */}
+      {!ASSIGNMENT_TASKS[asg.stage] && <div className="pt-4 mt-2 border-t-2" style={{borderColor: stage?.color ? stage.color + "30" : B.border}}>
         {primaryAction && <>
           <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-2" style={{color: stage?.color || B.accent}}>
             <span>👉 Главное действие</span>
@@ -11570,7 +12172,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             {secondaryAction.label}
           </Btn>
         </div>}
-      </div>
+      </div>}
     </Card>
 
     {/* ─── Modal: return to supplier ─── */}
@@ -11703,24 +12305,6 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       coolDownSec={3}
       icon={CheckCircle}
       accent={B.green}
-    />
-
-    {/* ─── Escalate to legal modal (debtor_defaulted) ─── */}
-    <DangerConfirmModal
-      open={escalateLegalModal}
-      onClose={() => setEscalateLegalModal(false)}
-      onConfirm={() => {
-        const courtCase = `А-${Math.floor(Math.random() * 900 + 100)}/2026`;
-        doAdvance("debtor_defaulted", {defaultedDate: "2026-03-26", courtCaseNumber: courtCase, legal_assigned: "Кузнецов А.П."}, `⚖️ Передано юр.отделу. Дело ${courtCase}`);
-      }}
-      title="Передать в юр.отдел?"
-      description="Уступка будет признана дефолтной. Юр.отдел подготовит исковое заявление в суд. Досудебное урегулирование завершено."
-      amount={asg.amount || 0}
-      recipient={`Должник: ${debtor?.name || "—"}`}
-      actionLabel="ПЕРЕДАТЬ"
-      coolDownSec={3}
-      icon={AlertTriangle}
-      accent={B.red}
     />
   </>;
 }
@@ -12368,6 +12952,48 @@ function AssignmentsPage({currentUser, setToast}) {
   useEffect(() => {
     try { sessionStorage.setItem("assignments-view-layout", viewLayout); } catch(e) {}
   }, [viewLayout]);
+
+  // ─── Слушаем nav events: открыть конкретную уступку из «Мои задачи» ───
+  useEffect(() => {
+    const openAssignment = (assignmentId, taskId) => {
+      const asg = assignmentsData.find(a => a.id === assignmentId);
+      if (asg) {
+        setSelectedAsg(asg);
+        if (taskId) {
+          setTimeout(() => {
+            const el = document.getElementById(`task-${taskId}`);
+            if (el) {
+              el.scrollIntoView({behavior: "smooth", block: "center"});
+              el.style.transition = "box-shadow 0.3s ease";
+              el.style.boxShadow = "0 0 0 4px rgba(30, 64, 175, 0.4)";
+              setTimeout(() => { el.style.boxShadow = ""; }, 2000);
+            }
+          }, 400);
+        }
+      }
+    };
+
+    // 1. Pending nav: если событие nav пришло до mount, читаем из sessionStorage
+    try {
+      const pending = sessionStorage.getItem("pendingAssignmentNav");
+      if (pending) {
+        const data = JSON.parse(pending);
+        if (data.ts && Date.now() - data.ts < 5000 && data.assignmentId) {
+          openAssignment(data.assignmentId, data.taskId);
+        }
+        sessionStorage.removeItem("pendingAssignmentNav");
+      }
+    } catch(e) {}
+
+    // 2. Live nav events (если пользователь уже на assignments page)
+    const handler = (e) => {
+      if (e.detail?.page === "assignments" && e.detail?.assignmentId) {
+        openAssignment(e.detail.assignmentId, e.detail.taskId);
+      }
+    };
+    window.addEventListener("oborotka:nav", handler);
+    return () => window.removeEventListener("oborotka:nav", handler);
+  }, [assignmentsData]);
 
   const myStages = getMyAssignmentStages(currentUser);
 
@@ -14492,12 +15118,8 @@ function ClientDetailView({client, onBack, setToast}) {
   const [rateModal, setRateModal] = useState(false);
   const [newLimit, setNewLimit] = useState(client.limit||0);
   const [newRate, setNewRate] = useState(client.rate||25);
-  // ─── Сессия 3: приглашения должников ───
-  const [inviteDebtorModal, setInviteDebtorModal] = useState(false);
-  const [invitationsState, setInvitationsState] = useState(DEBTOR_INVITATIONS);
-  // ─── Сессия 4: создание уступки ───
-  const [createAsgModal, setCreateAsgModal] = useState(null); // null | preselectedDebtor object
-  const [assignmentsState, setAssignmentsState] = useState(ASSIGNMENTS);
+  // ─── Сессия 3: приглашения должников (read-only для банка) ───
+  const [invitationsState] = useState(DEBTOR_INVITATIONS);
 
   const clientDeals = ALL_DEALS.filter(d=>d.creditorId===client.id||d.debtorId===client.id);
   // Active factoring deals (from pipeline) — per customer feedback, show them on client page
@@ -14828,23 +15450,22 @@ function ClientDetailView({client, onBack, setToast}) {
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <span className="text-base">🚚</span>
-            <h3 className="text-sm font-bold" style={{color: B.t1}}>Мои должники (приглашения)</h3>
+            <h3 className="text-sm font-bold" style={{color: B.t1}}>Должники клиента</h3>
             <span className="text-[10px] px-2 py-0.5 rounded-full" style={{background: "#F1F5F9", color: B.t2}}>
               {myInvitations.length}
             </span>
           </div>
-          <div className="flex gap-2">
-            {verified.length > 0 && <Btn size="sm" variant="secondary" icon={FileText} onClick={() => setCreateAsgModal({_noPreselect: true})}>
-              Новая уступка
-            </Btn>}
-            <Btn size="sm" variant="primary" icon={Plus} onClick={() => setInviteDebtorModal(true)}>
-              Пригласить должника
-            </Btn>
-          </div>
+          <span className="text-[10px] px-2 py-0.5 rounded-full" style={{background: "#F1F5F9", color: B.t3}}>
+            👁 Только просмотр
+          </span>
+        </div>
+
+        <div className="text-[10px] mb-3 italic" style={{color: B.t3}}>
+          Кредитор приглашает должников и создаёт уступки в своём личном кабинете. Банк только верифицирует должников и обрабатывает уступки.
         </div>
 
         {myInvitations.length === 0 ? <div className="text-center py-6 text-[11px]" style={{color: B.t3}}>
-          Вы ещё никого не приглашали. Чтобы создавать уступки, сначала пригласите должника на верификацию.
+          Клиент ещё не приглашал должников.
         </div> : <>
           {/* Верифицированные — основной workflow */}
           {verified.length > 0 && <div className="mb-3">
@@ -14868,9 +15489,6 @@ function ClientDetailView({client, onBack, setToast}) {
                     <div className="text-[9px]" style={{color: B.t3}}>Доступно</div>
                     <div className="text-xs font-bold mono" style={{color: B.green}}>{fmtByn(limitInfo.available)}</div>
                   </div>}
-                  <Btn size="sm" variant="primary" icon={Plus} onClick={() => setCreateAsgModal(debtorCompany)}>
-                    Уступка
-                  </Btn>
                 </div>;
               })}
             </div>
@@ -14915,12 +15533,6 @@ function ClientDetailView({client, onBack, setToast}) {
                     <div className="text-[9px]" style={{color: B.t3}}>
                       Этап {stageIdx + 1}/{stages.length}
                     </div>
-                    <button onClick={() => {
-                      navigator.clipboard?.writeText(inv.invitationLink);
-                      setToast && setToast({msg: "Ссылка скопирована", type: "success"});
-                    }} className="text-[10px] hover:underline" style={{color: B.accent}}>
-                      📎 Скопировать ссылку
-                    </button>
                   </div>
                 </div>;
               })}
@@ -14958,46 +15570,6 @@ function ClientDetailView({client, onBack, setToast}) {
         </div>
       </Card>;
     })()}
-
-    {/* ═══ MODAL: Пригласить должника ═══ */}
-    {inviteDebtorModal && <InviteDebtorModal
-      creditor={client}
-      onClose={() => setInviteDebtorModal(false)}
-      onInvite={(invData) => {
-        const newInvitation = {
-          id: `INV-${String(invitationsState.length + 1).padStart(3, "0")}`,
-          creditorId: client.id,
-          creditorName: client.name,
-          ...invData,
-          sentAt: new Date().toISOString().slice(0, 19).replace("T", " "),
-          status: "sent",
-          debtorCompanyId: null,
-          openedAt: null,
-        };
-        setInvitationsState(prev => [...prev, newInvitation]);
-        setInviteDebtorModal(false);
-        setToast && setToast({
-          msg: `Приглашение отправлено: ${invData.debtorEmail}`,
-          type: "success",
-        });
-      }}/>}
-
-    {/* ═══ MODAL: Создание уступки ═══ */}
-    {createAsgModal && <CreateAssignmentModal
-      creditor={client}
-      preselectedDebtor={createAsgModal._noPreselect ? null : createAsgModal}
-      allInvitations={invitationsState}
-      allAssignments={assignmentsState}
-      onClose={() => setCreateAsgModal(null)}
-      onCreate={(newAsg) => {
-        setAssignmentsState(prev => [...prev, newAsg]);
-        setCreateAsgModal(null);
-        setToast && setToast({
-          msg: `Уступка ${newAsg.dfNumber} создана. Передана УСКО на проверку.`,
-          type: "success",
-        });
-      }}
-      setToast={setToast}/>}
 
     <div className="grid gap-6" style={{gridTemplateColumns:"1fr 280px"}}>
       <div className="space-y-5 min-w-0">
@@ -15544,556 +16116,6 @@ function ClientDetailPage({popNav,pushNav,setToast}) {
   return <div><PageHeader title="Детали клиента" breadcrumbs={["Клиенты","Детали"]} onBack={popNav}/></div>;
 }
 
-// ═══════════════════════════════════════════════════════════
-// InviteDebtorModal — приглашение должника на верификацию (Phase 0 нового workflow)
-// ═══════════════════════════════════════════════════════════
-function InviteDebtorModal({creditor, onClose, onInvite}) {
-  const [debtorCompanyHint, setDebtorCompanyHint] = useState("");
-  const [debtorEmail, setDebtorEmail] = useState("");
-  const [debtorPhone, setDebtorPhone] = useState("");
-  const [unp, setUnp] = useState("");
-  const [message, setMessage] = useState("");
-  const [previewMode, setPreviewMode] = useState(false);
-
-  // Auto-generate invitation link (mock)
-  const invitationLink = `https://oborotka.by/r/${Math.random().toString(36).substring(2, 14)}`;
-
-  const isValid = debtorCompanyHint.trim() && debtorEmail.includes("@") && (debtorPhone.length >= 10 || unp.length === 9);
-
-  const submit = () => {
-    onInvite({
-      debtorCompanyHint: debtorCompanyHint.trim(),
-      debtorEmail: debtorEmail.trim(),
-      debtorPhone: debtorPhone.trim(),
-      unp: unp.trim() || null,
-      message: message.trim() || null,
-      invitationLink,
-    });
-  };
-
-  return <Modal open={true} onClose={onClose} title="Пригласить должника на верификацию">
-    <div className="space-y-4">
-      {/* Info banner */}
-      <div className="p-3 rounded-lg" style={{background: "#EEF2FF", color: "#6366F1"}}>
-        <div className="flex items-start gap-2">
-          <span className="text-base shrink-0">ℹ️</span>
-          <div className="text-[11px]">
-            <strong>Шаг 0 факторингового конвейера.</strong> Ваш должник получит ссылку на регистрацию. После идентификации и скоринга банк установит ему лимит, и вы сможете создавать уступки на этого должника.
-          </div>
-        </div>
-      </div>
-
-      {!previewMode ? <>
-        {/* Form */}
-        <div>
-          <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-            Название организации должника <span style={{color: B.red}}>*</span>
-          </label>
-          <input value={debtorCompanyHint} onChange={e => setDebtorCompanyHint(e.target.value)}
-            placeholder="ООО «Название»"
-            className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-              УНП (если знаете)
-            </label>
-            <input value={unp} onChange={e => setUnp(e.target.value.replace(/\D/g, "").slice(0, 9))}
-              placeholder="190000000"
-              className="w-full px-3 py-2 text-sm rounded-lg border mono" style={{borderColor: B.border, color: B.t1}}/>
-            <div className="text-[9px] mt-1" style={{color: B.t3}}>9 цифр</div>
-          </div>
-          <div>
-            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-              Телефон должника
-            </label>
-            <input value={debtorPhone} onChange={e => setDebtorPhone(e.target.value)}
-              placeholder="+375 17 123-45-67"
-              className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
-          </div>
-        </div>
-
-        <div>
-          <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-            Email должника <span style={{color: B.red}}>*</span>
-          </label>
-          <input type="email" value={debtorEmail} onChange={e => setDebtorEmail(e.target.value)}
-            placeholder="buh@company.by"
-            className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
-          <div className="text-[9px] mt-1" style={{color: B.t3}}>На этот адрес будет отправлено приглашение со ссылкой на регистрацию</div>
-        </div>
-
-        <div>
-          <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-            Сопроводительное сообщение (опционально)
-          </label>
-          <textarea value={message} onChange={e => setMessage(e.target.value)} rows={2}
-            placeholder="Например: «Олег, добрый день. Подключитесь к платформе для оформления факторинга по нашим поставкам»"
-            className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
-        </div>
-
-        {/* What happens next */}
-        <div className="p-3 rounded-lg text-[10px]" style={{background: "#F8FAFC", color: B.t2}}>
-          <strong style={{color: B.t1}}>Что произойдёт после отправки:</strong>
-          <ol className="mt-1 space-y-0.5 ml-4 list-decimal">
-            <li>Должник получит email со ссылкой на регистрацию</li>
-            <li>Зарегистрируется на платформе и пройдёт идентификацию (МСИ или агент)</li>
-            <li>Банк проведёт скоринг должника (1-2 рабочих дня)</li>
-            <li>Если скоринг успешный — банк установит лимит (объём)</li>
-            <li>Вы получите уведомление и сможете создавать уступки на этого должника</li>
-          </ol>
-        </div>
-      </> : <>
-        {/* Preview mode */}
-        <div className="p-4 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
-          <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-            Превью email-приглашения
-          </div>
-          <div className="text-xs" style={{color: B.t2}}>
-            <div className="mb-2">
-              <span style={{color: B.t3}}>Кому:</span> <strong style={{color: B.t1}}>{debtorEmail}</strong>
-            </div>
-            <div className="mb-2">
-              <span style={{color: B.t3}}>Тема:</span> <strong style={{color: B.t1}}>Приглашение к платформе Oborotka.by для факторинга</strong>
-            </div>
-            <hr className="my-3" style={{borderColor: B.border}}/>
-            <p className="mb-2">Здравствуйте,</p>
-            <p className="mb-2">
-              Компания <strong>{creditor.name}</strong> приглашает вас зарегистрироваться на платформе <strong>Oborotka.by</strong> для оформления факторингового финансирования по вашим поставкам.
-            </p>
-            {message && <p className="mb-2 italic" style={{color: B.t3}}>«{message}»</p>}
-            <p className="mb-2">
-              Для регистрации перейдите по ссылке:
-            </p>
-            <div className="p-2 rounded font-semibold mono break-all" style={{background: "#EEF2FF", color: "#6366F1"}}>
-              {invitationLink}
-            </div>
-            <p className="mt-3 mb-2">
-              Регистрация займёт около 10 минут. Потребуется паспорт руководителя и доступ к ЭЦП ГосСУОК.
-            </p>
-            <p className="mb-2">
-              Если у вас есть вопросы — обратитесь к менеджеру банка.
-            </p>
-            <p className="mt-4 text-[10px]" style={{color: B.t3}}>
-              С уважением, команда Oborotka.by · ЗАО «Нео Банк Азия»
-            </p>
-          </div>
-        </div>
-      </>}
-
-      {/* Footer */}
-      <div className="flex justify-between items-center pt-3 border-t" style={{borderColor: B.border}}>
-        <Btn variant="ghost" onClick={onClose}>Отмена</Btn>
-        <div className="flex gap-2">
-          <Btn variant="secondary" icon={Eye}
-            onClick={() => setPreviewMode(!previewMode)}
-            disabled={!isValid}>
-            {previewMode ? "Назад к редактированию" : "Превью email"}
-          </Btn>
-          <Btn variant="primary" icon={Mail} disabled={!isValid} onClick={submit}>
-            Отправить приглашение
-          </Btn>
-        </div>
-      </div>
-    </div>
-  </Modal>;
-}
-
-// ═══════════════════════════════════════════════════════════
-// CreateAssignmentModal — создание уступки (Phase 1 нового workflow)
-// 4-шаговый wizard:
-//   Шаг 1: Выбор/подтверждение должника + проверка лимита
-//   Шаг 2: Загрузка ДКП + реестр ТТН (несколько строк)
-//   Шаг 3: Существенные условия ДФ + auto-расчёт дисконта
-//   Шаг 4: Подтверждение и отправка
-// ═══════════════════════════════════════════════════════════
-function CreateAssignmentModal({creditor, preselectedDebtor, allInvitations, allAssignments, onClose, onCreate, setToast}) {
-  const [step, setStep] = useState(1);
-  const [submitting, setSubmitting] = useState(false);
-
-  // Step 1: debtor selection
-  const [selectedDebtorId, setSelectedDebtorId] = useState(preselectedDebtor?.id || null);
-
-  // Step 2: documents
-  const [dkpFile, setDkpFile] = useState(null);
-  const [dkpNumber, setDkpNumber] = useState("");
-  const [dkpDate, setDkpDate] = useState("");
-  const [ttnRows, setTtnRows] = useState([
-    {ttnNumber: "", amount: "", shipDate: "", description: ""},
-  ]);
-
-  // Step 3: essential terms
-  const [rate, setRate] = useState(25);
-  const [termDays, setTermDays] = useState(60);
-
-  // ─── Verified debtors only ───
-  const verifiedDebtors = (allInvitations || [])
-    .filter(inv => inv.creditorId === creditor.id && inv.status === "verified")
-    .map(inv => COMPANIES.find(c => c.id === inv.debtorCompanyId))
-    .filter(Boolean);
-
-  const selectedDebtor = COMPANIES.find(c => c.id === selectedDebtorId);
-  const debtorLimit = selectedDebtor ? getDebtorLimit(selectedDebtor) : null;
-
-  // ─── Auto-calculations ───
-  const totalAmount = ttnRows.reduce((sum, row) => sum + (parseFloat(row.amount) || 0), 0);
-  const discount = totalAmount && rate && termDays
-    ? Math.round((totalAmount * (rate / 100) * termDays) / 365)
-    : 0;
-  const toReceive = totalAmount - discount;
-  const limitCheck = selectedDebtor && totalAmount > 0
-    ? canDebtorAcceptAssignment(selectedDebtor, totalAmount)
-    : null;
-
-  // Generate DF number based on today
-  const today = new Date().toISOString().slice(0, 10); // 2026-04-28
-  const todayAssignmentsCount = (allAssignments || []).filter(a => a.dfDate === today).length;
-  const dfNumber = `ДФ-${today}-${String(todayAssignmentsCount + 1).padStart(3, "0")}`;
-
-  // ─── Validation per step ───
-  const canGoStep2 = selectedDebtorId && limitCheck?.ok;
-  const canGoStep3 = dkpNumber.trim() && dkpDate && ttnRows.every(r => r.ttnNumber.trim() && parseFloat(r.amount) > 0);
-  const canGoStep4 = rate > 0 && termDays > 0 && totalAmount > 0;
-
-  // ─── Handlers ───
-  const addTtnRow = () => setTtnRows(prev => [...prev, {ttnNumber: "", amount: "", shipDate: today, description: ""}]);
-  const removeTtnRow = (idx) => setTtnRows(prev => prev.filter((_, i) => i !== idx));
-  const updateTtnRow = (idx, field, value) => setTtnRows(prev => prev.map((r, i) => i === idx ? {...r, [field]: value} : r));
-
-  const submit = () => {
-    setSubmitting(true);
-    setTimeout(() => {
-      const newAssignment = {
-        id: `ASG-NEW-${Date.now()}`,
-        dealId: `REQ-${creditor.id}`,
-        creditorId: creditor.id,
-        debtorId: selectedDebtorId,
-        amount: totalAmount,
-        discount, toReceive,
-        rate, termDays,
-        stage: "usko_review", // ← после создания сразу попадает к УСКО на проверку
-        stageStartDate: today,
-        createdDate: today,
-        // Новая модель
-        dfNumber, dfDate: today,
-        ttnRegistry: ttnRows.map(r => ({
-          ttnNumber: r.ttnNumber.trim(),
-          amount: parseFloat(r.amount),
-          shipDate: r.shipDate || today,
-          description: r.description.trim() || null,
-        })),
-        signatures: {
-          bank:               {signed: false, signedBy: null, signedAt: null, certNumber: null},
-          creditor_df:        {signed: false, signedAt: null},
-          creditor_act:       {signed: false, signedAt: null},
-          debtor_act:         {signed: false, signedAt: null},
-          debtor_notification:{signed: false, signedAt: null},
-        },
-        financing: {
-          accountNumber: null,
-          authorizationDate: null,
-          disbursedDate: null,
-          disbursedBy: null,
-        },
-        docs: {
-          dkp: {status: "uploaded", number: dkpNumber, date: dkpDate, filename: dkpFile?.name || "ДКП.pdf"},
-        },
-        history: [
-          {action: "assignment_created", user: creditor.name, userRole: "creditor", date: today + " " + new Date().toTimeString().slice(0, 5),
-           comment: `Создана уступка на ${fmtByn(totalAmount)} (${ttnRows.length} ТТН)`},
-        ],
-      };
-      setSubmitting(false);
-      onCreate(newAssignment);
-    }, 1200);
-  };
-
-  return <Modal open={true} onClose={onClose} title={`Новая уступка${selectedDebtor ? ` → ${selectedDebtor.name}` : ""}`}>
-    <div className="space-y-4">
-      {/* ─── Step indicator ─── */}
-      <div className="flex items-center gap-2 mb-2">
-        {[
-          {n: 1, label: "Должник"},
-          {n: 2, label: "Документы"},
-          {n: 3, label: "Условия"},
-          {n: 4, label: "Подтверждение"},
-        ].map((s, i, arr) => <React.Fragment key={s.n}>
-          <div className="flex items-center gap-1.5">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-colors"
-              style={{
-                background: step >= s.n ? B.accent : "#E2E8F0",
-                color: step >= s.n ? "white" : B.t3,
-              }}>
-              {step > s.n ? "✓" : s.n}
-            </div>
-            <span className="text-[11px] font-semibold" style={{color: step >= s.n ? B.t1 : B.t3}}>
-              {s.label}
-            </span>
-          </div>
-          {i < arr.length - 1 && <div className="flex-1 h-0.5" style={{background: step > s.n ? B.accent : "#E2E8F0"}}/>}
-        </React.Fragment>)}
-      </div>
-
-      {/* ─── STEP 1: Выбор должника ─── */}
-      {step === 1 && <div className="space-y-3">
-        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
-          Выберите верифицированного должника, на которого создаёте уступку
-        </div>
-
-        {verifiedDebtors.length === 0 ? <div className="p-4 rounded-lg text-center" style={{background: B.yellowL}}>
-          <div className="text-xs font-bold mb-1" style={{color: B.yellow}}>⚠ Нет верифицированных должников</div>
-          <div className="text-[11px]" style={{color: B.t2}}>
-            Сначала пригласите должника на верификацию (Шаг 0). Когда банк проведёт скоринг и установит лимит — он появится в этом списке.
-          </div>
-        </div> : <div className="space-y-1.5 max-h-[280px] overflow-auto pr-1">
-          {verifiedDebtors.map(d => {
-            const limitInfo = getDebtorLimit(d);
-            const isSelected = d.id === selectedDebtorId;
-            const isUsable = !limitInfo?.isRejected && limitInfo?.available > 0;
-            return <button key={d.id} onClick={() => isUsable && setSelectedDebtorId(d.id)}
-              disabled={!isUsable}
-              className="w-full text-left p-3 rounded-lg transition-all"
-              style={{
-                background: isSelected ? B.accentL : "white",
-                border: `2px solid ${isSelected ? B.accent : B.border}`,
-                opacity: isUsable ? 1 : 0.5,
-                cursor: isUsable ? "pointer" : "not-allowed",
-              }}>
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold" style={{color: B.t1}}>{d.name}</div>
-                  <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>УНП {d.unp}</div>
-                  {limitInfo && <div className="text-[10px] mt-1" style={{color: B.t2}}>
-                    Лимит: <strong>{fmtByn(limitInfo.total)}</strong> · Доступно: <strong style={{color: B.green}}>{fmtByn(limitInfo.available)}</strong>
-                  </div>}
-                </div>
-                {isSelected && <CheckCircle size={18} style={{color: B.accent}} className="shrink-0"/>}
-                {!isUsable && <span className="text-[10px] px-2 py-0.5 rounded-full" style={{background: B.redL, color: B.red}}>
-                  Лимит исчерпан
-                </span>}
-              </div>
-            </button>;
-          })}
-        </div>}
-
-        {selectedDebtor && limitCheck && !limitCheck.ok && <div className="p-3 rounded-lg" style={{background: B.redL}}>
-          <div className="text-xs font-bold" style={{color: B.red}}>⚠ Невозможно создать уступку</div>
-          <div className="text-[11px] mt-1" style={{color: B.t2}}>{limitCheck.reason}</div>
-        </div>}
-      </div>}
-
-      {/* ─── STEP 2: Документы ─── */}
-      {step === 2 && <div className="space-y-3">
-        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
-          Загрузите договор купли-продажи и реестр ТТН за день
-        </div>
-
-        {/* ДКП */}
-        <div className="p-3 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
-          <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-            Договор купли-продажи (ДКП) <span style={{color: B.red}}>*</span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 mb-2">
-            <input value={dkpNumber} onChange={e => setDkpNumber(e.target.value)}
-              placeholder="№ договора, например ДКП-2026-001"
-              className="px-3 py-2 text-sm rounded-lg border mono" style={{borderColor: B.border, color: B.t1}}/>
-            <input type="date" value={dkpDate} onChange={e => setDkpDate(e.target.value)}
-              className="px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
-          </div>
-          <label className="flex items-center gap-2 p-2 rounded-lg cursor-pointer hover:bg-slate-50" style={{border: `1px dashed ${B.border}`}}>
-            <input type="file" accept=".pdf,.doc,.docx" onChange={e => setDkpFile(e.target.files?.[0] || null)} className="hidden"/>
-            <Plus size={14} style={{color: B.accent}}/>
-            <span className="text-[11px]" style={{color: dkpFile ? B.green : B.accent}}>
-              {dkpFile ? `✓ ${dkpFile.name}` : "Прикрепить файл (PDF/DOC)"}
-            </span>
-          </label>
-        </div>
-
-        {/* ТТН Registry */}
-        <div className="p-3 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>
-              Реестр ТТН (товарно-транспортные накладные за день) <span style={{color: B.red}}>*</span>
-            </div>
-            <Btn size="sm" variant="ghost" icon={Plus} onClick={addTtnRow}>Добавить ТТН</Btn>
-          </div>
-          <div className="space-y-1.5">
-            {ttnRows.map((row, idx) => <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
-              <input value={row.ttnNumber} onChange={e => updateTtnRow(idx, "ttnNumber", e.target.value)}
-                placeholder="№ ТТН"
-                className="col-span-3 px-2 py-1.5 text-xs rounded border mono" style={{borderColor: B.border, color: B.t1}}/>
-              <input type="number" value={row.amount} onChange={e => updateTtnRow(idx, "amount", e.target.value)}
-                placeholder="Сумма BYN" min="0" step="0.01"
-                className="col-span-2 px-2 py-1.5 text-xs rounded border mono text-right" style={{borderColor: B.border, color: B.t1}}/>
-              <input type="date" value={row.shipDate} onChange={e => updateTtnRow(idx, "shipDate", e.target.value)}
-                className="col-span-2 px-2 py-1.5 text-xs rounded border" style={{borderColor: B.border, color: B.t1}}/>
-              <input value={row.description} onChange={e => updateTtnRow(idx, "description", e.target.value)}
-                placeholder="Описание (опционально)"
-                className="col-span-4 px-2 py-1.5 text-xs rounded border" style={{borderColor: B.border, color: B.t1}}/>
-              {ttnRows.length > 1 && <button onClick={() => removeTtnRow(idx)} className="col-span-1 p-1.5 hover:bg-slate-100 rounded">
-                <X size={12} style={{color: B.red}}/>
-              </button>}
-            </div>)}
-          </div>
-          <div className="mt-2 pt-2 border-t flex items-center justify-between text-[11px]" style={{borderColor: B.border}}>
-            <span style={{color: B.t3}}>Итого по реестру:</span>
-            <span className="font-bold mono" style={{color: B.t1}}>{fmtByn(totalAmount)}</span>
-          </div>
-        </div>
-      </div>}
-
-      {/* ─── STEP 3: Существенные условия ─── */}
-      {step === 3 && <div className="space-y-3">
-        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
-          Существенные условия договора факторинга
-        </div>
-
-        <div className="p-3 rounded-lg" style={{background: "#EEF2FF", borderLeft: `3px solid ${B.accent}`}}>
-          <div className="flex items-center gap-2 mb-2">
-            <FileText size={14} style={{color: B.accent}}/>
-            <div className="text-xs font-bold" style={{color: B.t1}}>Будет сформирован {dfNumber}</div>
-          </div>
-          <div className="text-[10px]" style={{color: B.t3}}>
-            Договор факторинга на 1 страничку с реестром ТТН за {today}. Общие условия (оферта) — на сайте банка.
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-              Ставка дисконта (% годовых) <span style={{color: B.red}}>*</span>
-            </label>
-            <input type="number" value={rate} onChange={e => setRate(parseFloat(e.target.value) || 0)}
-              min="0" max="100" step="0.5"
-              className="w-full px-3 py-2 text-sm rounded-lg border mono text-right" style={{borderColor: B.border, color: B.t1}}/>
-            <div className="text-[9px] mt-1" style={{color: B.t3}}>Стандарт: 25% для класса A, 30% для B</div>
-          </div>
-          <div>
-            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
-              Срок отсрочки (дней) <span style={{color: B.red}}>*</span>
-            </label>
-            <input type="number" value={termDays} onChange={e => setTermDays(parseInt(e.target.value) || 0)}
-              min="1" max="180"
-              className="w-full px-3 py-2 text-sm rounded-lg border mono text-right" style={{borderColor: B.border, color: B.t1}}/>
-            <div className="text-[9px] mt-1" style={{color: B.t3}}>Стандарт: 60 дней (срок отсрочки должника)</div>
-          </div>
-        </div>
-
-        {/* Calculation preview */}
-        <div className="p-4 rounded-lg" style={{background: B.greenL, border: `1px solid ${B.green}30`}}>
-          <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.green}}>
-            Расчёт по уступке
-          </div>
-          <div className="space-y-1.5 text-[11px]">
-            <div className="flex justify-between">
-              <span style={{color: B.t2}}>Сумма уступки:</span>
-              <span className="mono font-bold" style={{color: B.t1}}>{fmtByn(totalAmount)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span style={{color: B.t2}}>Дисконт ({rate}% × {termDays}д / 365):</span>
-              <span className="mono font-bold" style={{color: B.red}}>− {fmtByn(discount)}</span>
-            </div>
-            <div className="pt-1.5 border-t flex justify-between text-sm" style={{borderColor: B.green + "40"}}>
-              <span className="font-bold" style={{color: B.t1}}>К получению (вам на счёт):</span>
-              <span className="mono font-black" style={{color: B.green}}>{fmtByn(toReceive)}</span>
-            </div>
-          </div>
-          <div className="mt-2 pt-2 border-t text-[10px]" style={{borderColor: B.green + "40", color: B.t3}}>
-            Формула: <strong>amount × (rate/100) × termDays / 365</strong>. Должник оплатит полную сумму через {termDays} дней.
-          </div>
-        </div>
-      </div>}
-
-      {/* ─── STEP 4: Подтверждение ─── */}
-      {step === 4 && <div className="space-y-3">
-        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
-          Проверьте параметры уступки перед отправкой
-        </div>
-
-        {/* Summary card */}
-        <div className="p-4 rounded-lg" style={{background: "white", border: `2px solid ${B.accent}`}}>
-          <div className="text-xs font-bold mb-3" style={{color: B.accent}}>📋 {dfNumber}</div>
-
-          <div className="space-y-2.5 text-[11px]">
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <div className="text-[10px]" style={{color: B.t3}}>Кредитор (вы)</div>
-                <div className="font-semibold" style={{color: B.t1}}>{creditor.name}</div>
-              </div>
-              <div>
-                <div className="text-[10px]" style={{color: B.t3}}>Должник</div>
-                <div className="font-semibold" style={{color: B.t1}}>{selectedDebtor?.name}</div>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t" style={{borderColor: B.border}}>
-              <div className="text-[10px] mb-1" style={{color: B.t3}}>ДКП</div>
-              <div className="font-semibold mono" style={{color: B.t1}}>№ {dkpNumber} от {dkpDate}</div>
-            </div>
-
-            <div className="pt-2 border-t" style={{borderColor: B.border}}>
-              <div className="text-[10px] mb-1" style={{color: B.t3}}>Реестр ТТН ({ttnRows.length} {ttnRows.length === 1 ? "штука" : "шт"})</div>
-              <div className="space-y-0.5">
-                {ttnRows.map((r, i) => <div key={i} className="flex justify-between">
-                  <span style={{color: B.t2}}>{r.ttnNumber} {r.description && `· ${r.description}`}</span>
-                  <span className="mono font-semibold" style={{color: B.t1}}>{fmtByn(parseFloat(r.amount) || 0)}</span>
-                </div>)}
-              </div>
-            </div>
-
-            <div className="pt-2 border-t grid grid-cols-3 gap-2" style={{borderColor: B.border}}>
-              <div>
-                <div className="text-[10px]" style={{color: B.t3}}>Сумма</div>
-                <div className="font-bold mono text-sm" style={{color: B.t1}}>{fmtByn(totalAmount)}</div>
-              </div>
-              <div>
-                <div className="text-[10px]" style={{color: B.t3}}>Дисконт</div>
-                <div className="font-bold mono text-sm" style={{color: B.red}}>− {fmtByn(discount)}</div>
-              </div>
-              <div>
-                <div className="text-[10px]" style={{color: B.t3}}>К выплате</div>
-                <div className="font-bold mono text-sm" style={{color: B.green}}>{fmtByn(toReceive)}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* What happens next */}
-        <div className="p-3 rounded-lg text-[10px]" style={{background: "#F8FAFC", color: B.t2}}>
-          <strong style={{color: B.t1}}>Что произойдёт после отправки:</strong>
-          <ol className="mt-1 space-y-0.5 ml-4 list-decimal">
-            <li>Уступка попадёт к УСКО на проверку комплекта (этап usko_review)</li>
-            <li>УСКО сверит сумму с лимитом должника, проверит документы</li>
-            <li>{totalAmount > 50000 ? <span><strong>Сумма &gt; 50К → потребуется решение ЛПР</strong></span> : "Сумма ≤ 50К → УСКО одобряет сам"}</li>
-            <li>УСКО заполнит карточки в АБС, получит счёт</li>
-            <li>Платформа сформирует ДФ + акт сверки → банк подпишет → вы подпишете → должник подпишет</li>
-            <li>УСКО оформит распоряжение на выдачу → деньги придут вам на счёт</li>
-          </ol>
-        </div>
-      </div>}
-
-      {/* ─── Footer with step navigation ─── */}
-      <div className="flex justify-between items-center pt-3 border-t" style={{borderColor: B.border}}>
-        <Btn variant="ghost" onClick={step === 1 ? onClose : () => setStep(step - 1)}>
-          {step === 1 ? "Отмена" : "← Назад"}
-        </Btn>
-        <div className="text-[10px]" style={{color: B.t3}}>
-          Шаг {step} из 4
-        </div>
-        {step < 4 ? <Btn variant="primary" icon={ArrowRight}
-          disabled={(step === 1 && !canGoStep2) || (step === 2 && !canGoStep3) || (step === 3 && !canGoStep4)}
-          onClick={() => setStep(step + 1)}>
-          Далее
-        </Btn> : <Btn variant="primary" icon={submitting ? Loader2 : CheckCircle}
-          disabled={submitting}
-          onClick={submit}>
-          {submitting ? "Отправка..." : "Создать уступку"}
-        </Btn>}
-      </div>
-    </div>
-  </Modal>;
-}
 
 // ═══════════════════════════════════════════════════════════
 // PAGE: REPAYMENTS — модуль погашений (Сессия 8)
@@ -16648,166 +16670,6 @@ function DealDetailPage({popNav, setToast}) {
   return <div><PageHeader title="Уступка" breadcrumbs={["Портфель","Уступка"]} onBack={popNav}/></div>;
 }
 
-// ═══════════════════════════════════════
-// PAGE 5: OVERDUE
-// ═══════════════════════════════════════
-function OverduePage({pushNav, setToast}) {
-  const overdueDeals = ALL_DEALS.filter(d=>d.status==="overdue");
-
-  const getReservePercent = (days) => {
-    if(days>=180) return 100;
-    if(days>=31) return 50;
-    if(days>=8) return 20;
-    return 5;
-  };
-
-  const reserveScale = [
-    {day:0,pct:5,color:B.green},{day:8,pct:20,color:B.yellow},{day:31,pct:50,color:B.orange},{day:180,pct:100,color:B.red}
-  ];
-
-  return <div>
-    <PageHeader title="Просрочки" breadcrumbs={["Просрочки"]}
-      actions={<ExportButton filename="prosrochki" setToast={setToast}
-        columns={[
-          {key: "id", label: "ID"},
-          {key: "debtorId", label: "Должник", formatter: d => getDebtorName(d.debtorId)},
-          {key: "creditorId", label: "Кредитор", formatter: d => getCreditorName(d.creditorId)},
-          {key: "amount", label: "Сумма"},
-          {key: "daysLeft", label: "Дней просрочки", formatter: d => Math.abs(d.daysLeft)},
-          {key: "reservePct", label: "Резерв %", formatter: d => getReservePercent(Math.abs(d.daysLeft))},
-          {key: "reserveByn", label: "Резерв BYN", formatter: d => Math.round(d.amount * getReservePercent(Math.abs(d.daysLeft)) / 100)},
-        ]}
-        rows={overdueDeals}/>}/>
-
-    {/* Debtor-overdue + defaulted banner */}
-    {(() => {
-      const debtorOverdue = ASSIGNMENTS.filter(a => a.stage === "debtor_overdue");
-      const debtorDefaulted = ASSIGNMENTS.filter(a => a.stage === "debtor_defaulted");
-      if (debtorOverdue.length === 0 && debtorDefaulted.length === 0) return null;
-      const totalAmount = [...debtorOverdue, ...debtorDefaulted].reduce((s, a) => s + (a.amount || 0), 0);
-      return <Card className="p-4 mb-5" style={{background: B.redL, borderLeft: `4px solid ${B.red}`}}>
-        <div className="flex items-start justify-between gap-3 flex-wrap">
-          <div className="flex items-start gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style={{background: "white"}}>
-              <AlertTriangle size={20} style={{color: B.red}} className="animate-pulse"/>
-            </div>
-            <div className="min-w-0">
-              <div className="text-xs font-bold uppercase tracking-wider" style={{color: B.red}}>
-                Неплатящие должники — фаза recover
-              </div>
-              <div className="text-sm font-black mt-1" style={{color: B.t1}}>
-                {debtorOverdue.length} в просрочке + {debtorDefaulted.length} в юр.отделе = <span className="mono">{fmtByn(totalAmount)}</span> риска
-              </div>
-              <div className="text-[10px] mt-1" style={{color: B.t2}}>
-                Кредитные менеджеры работают с просрочкой. Если >14 дней — передача юр.отделу и судебное взыскание.
-              </div>
-            </div>
-          </div>
-          <Btn size="sm" variant="secondary" icon={ArrowRight} onClick={() => {
-            if (typeof window !== "undefined") window.location.hash = "#/assignments";
-          }}>
-            К уступкам
-          </Btn>
-        </div>
-      </Card>;
-    })()}
-
-    {/* Reserve scale visual */}
-    <Card className="p-5 mb-6">
-      <div className="flex items-start justify-between mb-3">
-        <h3 className="text-sm font-bold" style={{color:B.t1}}>
-          <InfoTooltip text="Шкала формирования резерва по просроченным уступкам согласно внутренней политике банка">Шкала резервов</InfoTooltip>
-        </h3>
-        <span className="text-[9px] px-1.5 py-0.5 rounded" style={{background:"#EEF2FF", color:"#6366F1"}}>АБС банка · read-only</span>
-      </div>
-      <div className="flex items-end gap-0 h-24">
-        {reserveScale.map((r,i)=><div key={i} className="flex-1 flex flex-col items-center justify-end">
-          <div className="text-xs font-bold mb-1" style={{color:r.color}}>{r.pct}%</div>
-          <div className="w-full rounded-t-lg" style={{height:`${r.pct*0.8}px`,background:r.color+"30",borderTop:`3px solid ${r.color}`}}/>
-          <div className="text-[10px] mt-1 font-medium" style={{color:B.t3}}>День {r.day}{i===3?"+":""}</div>
-        </div>)}
-      </div>
-      <div className="text-[10px] mt-4 p-2 rounded-lg flex items-start gap-1.5" style={{background:"#EEF2FF", color:"#6366F1"}}>
-        <Info size={11} className="shrink-0 mt-0.5"/>
-        <span>Резервирование средств, начисление пеней и движение по корр.счёту — операции АБС банка. Oborotka.by отображает актуальные значения, полученные из АБС «Нео Банк Азия».</span>
-      </div>
-    </Card>
-
-    {/* Escalation workflow */}
-    <Card className="p-5 mb-6">
-      <h3 className="text-sm font-bold mb-1" style={{color: B.t1}}>
-        <InfoTooltip text="Автоматические действия при просрочке платежа должником">Автоматическая эскалация</InfoTooltip>
-      </h3>
-      <div className="text-[10px] mb-4" style={{color: B.t3}}>
-        Платформа автоматически выполняет эти действия по мере увеличения просрочки
-      </div>
-      <div className="grid grid-cols-4 gap-0">
-        {[
-          {day: 3, label: "Напоминание", desc: "Платформа отправляет email и SMS должнику о приближающемся сроке", color: B.yellow, icon: Bell, action: "Auto"},
-          {day: 7, label: "Претензия", desc: "Автоматическая отправка официальной претензии с расчётом пеней", color: B.orange, icon: AlertTriangle, action: "Auto"},
-          {day: 14, label: "Юр.отдел", desc: "Передача дела в юридический отдел, блокировка новых уступок от кредитора", color: B.red, icon: FileText, action: "Auto + manual review"},
-          {day: 30, label: "Взыскание", desc: "Подача иска в суд, досудебное урегулирование", color: "#991B1B", icon: Ban, action: "Manual"},
-        ].map((step, idx, arr) => <React.Fragment key={idx}>
-          <div className="flex flex-col items-center p-3 rounded-xl" style={{background: step.color + "08", border: `1px solid ${step.color}30`}}>
-            <div className="w-10 h-10 rounded-full flex items-center justify-center mb-2 shrink-0" style={{background: "white", border: `2px solid ${step.color}`}}>
-              <step.icon size={16} style={{color: step.color}}/>
-            </div>
-            <div className="text-[11px] font-bold mb-0.5" style={{color: step.color}}>День {step.day}+</div>
-            <div className="text-[11px] font-bold mb-1" style={{color: B.t1}}>{step.label}</div>
-            <div className="text-[9px] leading-tight text-center" style={{color: B.t2}}>{step.desc}</div>
-            <div className="text-[8px] mt-2 px-1.5 py-0.5 rounded-full font-bold" style={{background: step.action === "Manual" ? B.yellowL : B.accentL, color: step.action === "Manual" ? B.yellow : B.accent}}>
-              {step.action === "Auto" ? "⚙ Автоматически" : step.action === "Manual" ? "👤 Ручное" : "⚙+👤"}
-            </div>
-          </div>
-        </React.Fragment>)}
-      </div>
-    </Card>
-
-    <Card className="overflow-hidden">
-      <div className="overflow-x-auto">
-      <table className="w-full text-xs" style={{minWidth:750}}>
-        <thead><tr className="border-b border-slate-100" style={{background:"#F8FAFC"}}>
-          <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>№</th>
-          <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Должник</th>
-          <th className="px-3 py-2.5 text-left font-semibold" style={{color:B.t3}}>Кредитор</th>
-          <th className="px-3 py-2.5 text-right font-semibold" style={{color:B.t3}}>Сумма</th>
-          <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Дней</th>
-          <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Резерв</th>
-          <th className="px-3 py-2.5 text-right font-semibold" style={{color:B.t3}}>Резерв BYN</th>
-          <th className="px-2 py-2.5 text-center font-semibold" style={{color:B.t3}}>Действия</th>
-        </tr></thead>
-        <tbody>{overdueDeals.map((d,i)=>{
-          const daysPast = Math.abs(d.daysLeft);
-          const resPct = getReservePercent(daysPast);
-          const resByn = Math.round(d.amount * resPct / 100);
-          return <tr key={d.id} className={`border-b border-slate-50 ${i%2===1?"bg-red-50/20":""}`}>
-            <td className="px-3 py-2.5 font-semibold mono" style={{color:B.red}}>{d.id}</td>
-            <td className="px-3 py-2.5 font-medium" style={{color:B.t1}}>{getDebtorName(d.debtorId)}</td>
-            <td className="px-3 py-2.5" style={{color:B.t2}}>{getCreditorName(d.creditorId)}</td>
-            <td className="px-3 py-2.5 font-bold text-right mono" style={{color:B.t1}}>{fmtByn(d.amount)}</td>
-            <td className="px-2 py-2.5 font-bold text-center" style={{color:B.red}}>{daysPast}</td>
-            <td className="px-2 py-2.5 font-bold text-center" style={{color:B.orange}}>{resPct}%</td>
-            <td className="px-3 py-2.5 font-bold text-right mono" style={{color:B.red}}>{fmtByn(resByn)}</td>
-            <td className="px-2 py-2.5 text-center">
-              <div className="flex items-center justify-center gap-1">
-                <Btn size="sm" variant="ghost" onClick={()=>setToast({msg:`Уведомление о просрочке направлено клиенту по ${d.id}`,type:"info"})}>Уведомить</Btn>
-                <Btn size="sm" variant="ghost" onClick={()=>setToast({msg:`Претензия направлена`,type:"info"})}>Претензия</Btn>
-              </div>
-            </td>
-          </tr>})}
-        </tbody>
-      </table>
-      </div>
-      {overdueDeals.length===0&&<div className="p-10 text-center text-sm" style={{color:B.t3}}>Нет просроченных уступок</div>}
-    </Card>
-
-    <div className="mt-4 p-4 rounded-xl text-xs" style={{background:B.accentL,color:B.accent}}>
-      <InfoTooltip text="Безрегрессный факторинг — риск неоплаты полностью на банке">
-        <span className="font-semibold">Безрегрессный факторинг:</span> регресс к кредитору НЕВОЗМОЖЕН. Recovery rate: ~50%.
-      </InfoTooltip>
-    </div>
-  </div>;
-}
 
 // ═══════════════════════════════════════
 // PAGE 6: DOCUMENTS (3-tab redesign)
