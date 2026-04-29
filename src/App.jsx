@@ -127,47 +127,47 @@ const ROLE_ACCESS = {
   },
   analyst: {
     label: "Кредитный аналитик",
-    description: "Верифицирует скоринг. ≤50K подписывает сам. >50K передаёт ЛПР.",
+    description: "Верифицирует скоринг кредиторов и должников. ≤50K подписывает сам. >50K передаёт ЛПР.",
     modules: ["dashboard", "pipeline", "clients", "scoring-admin"],
     stages: ["analyst_verification", "grey_zone"],
-    assignmentStages: [],
+    assignmentStages: ["debtor_scoring"],
     color: "#1E40AF",
     icon: "👤",
   },
   lpr: {
     label: "Лицо принимающее решение",
-    description: "Одобряет заявки свыше 50K. Подписывает Решение ЭЦП.",
-    modules: ["dashboard", "pipeline", "clients"],
+    description: "Одобряет заявки и уступки свыше 50K. Подписывает Решение ЭЦП.",
+    modules: ["dashboard", "pipeline", "clients", "assignments"],
     stages: ["lpr_decision"],
-    assignmentStages: [],
+    assignmentStages: ["lpr_decision_assignment"],
     color: "#7C3AED",
     icon: "✍️",
   },
   usko_prepare: {
     label: "УСКО — оформление договоров",
-    description: "Вносит номер счёта из АБС, генерирует ген.договор, обрабатывает уступки.",
-    modules: ["dashboard", "pipeline", "clients", "documents", "assignments"],
-    stages: ["contract_preparation", "client_activation"],
-    assignmentStages: ["usko_checking", "ds_preparing", "payment_approved"],
+    description: "Активация клиентов. Проверка уступок, заполнение АБС, формирование ДФ, выдача финансирования. Ежедневный матчинг погашений.",
+    modules: ["dashboard", "pipeline", "clients", "documents", "assignments", "repayments"],
+    stages: ["client_activation"],
+    assignmentStages: ["usko_review", "abs_card_creation", "df_generation", "payment_authorization", "payment_disbursed"],
     canRequestLimitReview: true,
     color: "#EA580C",
     icon: "📄",
   },
   signer: {
     label: "Подписант договоров",
-    description: "Подписывает ген.договоры и допсоглашения ЭЦП банка.",
+    description: "Подписывает договоры факторинга на каждую уступку ЭЦП банка.",
     modules: ["dashboard", "pipeline", "documents", "assignments"],
-    stages: ["contract_signing"],
-    assignmentStages: ["ds_signing_bank"],
+    stages: [],
+    assignmentStages: ["df_signing_bank"],
     color: "#06B6D4",
     icon: "🔏",
   },
   credit_ops: {
     label: "Кредитный менеджер",
-    description: "Отслеживает возврат средств от должников, эскалация просрочек",
-    modules: ["dashboard", "assignments", "overdue", "clients"],
+    description: "Отслеживает возврат средств от должников, эскалация просрочек, разбор погашений",
+    modules: ["dashboard", "assignments", "overdue", "clients", "repayments"],
     stages: [],
-    assignmentStages: ["awaiting_debtor", "debtor_overdue"],
+    assignmentStages: ["awaiting_debtor_payment", "debtor_overdue"],
     color: "#6366F1",
     icon: "🔄",
   },
@@ -179,30 +179,6 @@ const ROLE_ACCESS = {
     assignmentStages: ["debtor_defaulted"],
     color: "#991B1B",
     icon: "⚖️",
-  },
-  compliance_officer: {
-    label: "Комплаенс-офицер",
-    description: "Контроль соответствия 99-З, AML/KYC, проверка стоп-факторов и санкционных списков",
-    modules: ["dashboard", "clients", "audit-log", "stoplist", "documents"],
-    stages: [],
-    assignmentStages: [],
-    canViewAllPdn: true,
-    canReviewConsents: true,
-    canViewAuditLog: true,
-    color: "#7C3AED",
-    icon: "🛡️",
-  },
-  dpo: {
-    label: "Уполномоченный по защите ПДн (DPO)",
-    description: "Обработка запросов субъектов ПДн (99-З), реакция на инциденты, ведение реестра согласий",
-    modules: ["dashboard", "clients", "audit-log"],
-    stages: [],
-    assignmentStages: [],
-    canHandleSubjectRequests: true,
-    canReviewConsents: true,
-    canViewAuditLog: true,
-    color: "#0891B2",
-    icon: "🔒",
   },
 };
 
@@ -231,11 +207,8 @@ function getMyStages(user) {
 // После одобрения идут этапы оформления договора — у них свои нормативы (не SLA одобрения).
 const APPROVAL_STAGES = ["analyst_verification", "lpr_decision", "grey_zone"];
 
-// Нормативы на этапы оформления (после одобрения). Отдельный SLA от одобрения.
+// Нормативы на этапы после одобрения (теперь только активация клиента).
 const POST_APPROVAL_SLA = {
-  contract_preparation: 2,
-  contract_signing: 1,
-  client_signing: 5, // у клиента своё — банк на это не влияет, но трекаем
   client_activation: 1,
 };
 
@@ -304,7 +277,6 @@ function collectAllMyTasks(user, data) {
     if (overdue) category = "urgent";
     else if (p.stage === "analyst_verification" && !p.analystTakenBy) category = "new";
     else if (p.stage === "grey_zone") category = "review";
-    else if (p.stage === "client_signing") category = "waiting_client";
     else category = "in_progress";
 
     allTasks.push({
@@ -348,10 +320,18 @@ function collectAllMyTasks(user, data) {
         category,
         icon: Package,
         color: "#EA580C",
-        action: a.stage === "ds_preparing" ? "подготовить ДС"
-          : a.stage === "ds_signing_bank" ? "подписать ЭЦП банка"
-          : a.stage === "payment_approved" ? "провести оплату"
-          : a.stage === "usko_checking" ? "проверить документы"
+        action:
+            a.stage === "debtor_scoring" ? "провести скоринг должника"
+          : a.stage === "usko_review" ? "проверить ДКП + ТТН + лимит"
+          : a.stage === "lpr_decision_assignment" ? "одобрить уступку (compliance)"
+          : a.stage === "abs_card_creation" ? "заполнить карточки АБС"
+          : a.stage === "df_generation" ? "сформировать ДФ + акт"
+          : a.stage === "df_signing_bank" ? "подписать ЭЦП банка"
+          : a.stage === "payment_authorization" ? "оформить распоряжение"
+          : a.stage === "payment_disbursed" ? "подтвердить выдачу"
+          : a.stage === "awaiting_debtor_payment" ? "напомнить должнику"
+          : a.stage === "debtor_overdue" ? "взыскать просрочку"
+          : a.stage === "debtor_defaulted" ? "судебное взыскание"
           : "обработать",
         raw: a,
       });
@@ -484,14 +464,9 @@ function selectHeroTask(tasks) {
 }
 
 function getClientSilenceDays(req) {
-  if (!["client_signing"].includes(req.stage)) return 0;
-  const history = req.history || [];
-  const lastClientAction = history.slice().reverse().find(h =>
-    h.userRole === "client" || h.userRole === "supplier" || h.userRole === "debtor"
-  );
-  const now = new Date("2026-03-26");
-  const ref = lastClientAction ? new Date(lastClientAction.date) : new Date(req.stageStartDate || req.created);
-  return Math.max(0, Math.floor((now - ref) / 86400000));
+  // Клиент в скоринговом конвейере не подписывает договоров — этапа client_signing больше нет.
+  // Функция оставлена для совместимости и возвращает 0.
+  return 0;
 }
 
 function getAverageDaysOnStage(stage, tier) {
@@ -499,10 +474,7 @@ function getAverageDaysOnStage(stage, tier) {
   const averages = {
     analyst_verification: tier === "simple" ? 0.3 : 1.2,
     lpr_decision: 0.8,
-    contract_preparation: 0.4,
-    contract_signing: 0.3,
-    client_signing: 1.5,
-    client_activation: 0.2,
+    client_activation: 0.5,
   };
   return averages[stage] ?? null;
 }
@@ -511,9 +483,6 @@ function getMainActionLabel(stage, role) {
   const labels = {
     analyst_verification: "верифицировать",
     lpr_decision: "принять решение",
-    contract_preparation: "сгенерировать договор",
-    contract_signing: "подписать ЭЦП",
-    client_signing: "проверить подпись клиента",
     client_activation: "активировать клиента",
     grey_zone: "реанимировать",
   };
@@ -521,11 +490,27 @@ function getMainActionLabel(stage, role) {
 }
 
 // ─── DATA ───
+// ═══════════════════════════════════════════════════════════
+// COMPANIES — расширенная модель (по итогам встречи в банке)
+// КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ:
+//   • rolesOnPlatform — массив, ЮЛ может быть И кредитором, И должником
+//   • limitAsDebtor — лимит (объём) устанавливается КОГДА ЮЛ выступает должником
+//   • Кредитор НЕ имеет лимита — он может продавать на любые суммы
+//   • Лимит = 50К → должник может покупать на сумму до 50К (5×10К, 1×50К и т.д.)
+//   • После погашения должником лимит восстанавливается (вопрос для уточнения с банком)
+//
+// Совместимость со старым кодом:
+//   • Старые поля role / limit / used / available оставлены
+//   • Новые поля параллельно добавлены — будут использоваться для новой логики
+// ═══════════════════════════════════════════════════════════
 const COMPANIES = [
   {id:1, name:"ООО «СитиБетонСтрой»", unp:"169066611", role:"creditor", status:"active",
    regDate:"2026-01-15", director:"Дерябина О.Н.", phone:"+375 29 123-45-67",
    limit:830000, used:450000, available:380000, rate:25, scoringClass:"—",
    scoringType:"simplified", riskLevel:"low",
+   // ─── НОВАЯ МОДЕЛЬ ───
+   rolesOnPlatform: ["creditor"], // только кредитор — отгружает товары
+   limitAsDebtor: null,            // не имеет лимита как должник
    // ─── COMPLIANCE SECTION ───
    compliance: {
      formType: "simple",
@@ -562,24 +547,265 @@ const COMPANIES = [
   {id:2, name:"ООО «БелТехСнаб»", unp:"190456789", role:"debtor", status:"active",
    regDate:"2026-01-15", director:"Петров И.В.", limit:200000, used:85000,
    available:115000, rate:25, scoringClass:"A", scoringType:"full", riskLevel:"low",
-   scoring:{quantitative:78, qualitative:82, total:160, maxScore:200}},
+   scoring:{quantitative:78, qualitative:82, total:160, maxScore:200},
+   // ─── НОВАЯ МОДЕЛЬ ───
+   rolesOnPlatform: ["debtor"],
+   limitAsDebtor: {
+     total: 200000, used: 85000, available: 115000,
+     approvedDate: "2026-01-15", approvedBy: "Иванов А.С. (ЛПР)",
+     decisionId: "DEC-2026-001",
+     history: [
+       {date: "2026-01-15", action: "established", amount: 200000, by: "Иванов А.С. (ЛПР)"},
+     ],
+     activeAssignments: [], // populated by getDebtorActiveAssignments()
+   }},
   {id:3, name:"ЧУП «СтройИнвест»", unp:"290123456", role:"debtor", status:"active",
    regDate:"2026-02-01", director:"Козлов А.В.", limit:150000, used:60000,
    available:90000, rate:30, scoringClass:"B", scoringType:"full", riskLevel:"medium",
-   scoring:{quantitative:62, qualitative:65, total:127, maxScore:200}},
+   scoring:{quantitative:62, qualitative:65, total:127, maxScore:200},
+   rolesOnPlatform: ["debtor"],
+   limitAsDebtor: {
+     total: 150000, used: 60000, available: 90000,
+     approvedDate: "2026-02-01", approvedBy: "Иванов А.С. (ЛПР)",
+     decisionId: "DEC-2026-007",
+     history: [
+       {date: "2026-02-01", action: "established", amount: 150000, by: "Иванов А.С. (ЛПР)"},
+     ],
+     activeAssignments: [],
+   }},
   {id:4, name:"ООО «АгроТрейд Плюс»", unp:"390456789", role:"debtor", status:"active",
    regDate:"2026-01-20", director:"Сидоров Н.А.", limit:180000, used:120000,
    available:60000, rate:25, scoringClass:"A", scoringType:"full", riskLevel:"low",
-   scoring:{quantitative:75, qualitative:80, total:155, maxScore:200}},
+   scoring:{quantitative:75, qualitative:80, total:155, maxScore:200},
+   rolesOnPlatform: ["debtor"],
+   limitAsDebtor: {
+     total: 180000, used: 120000, available: 60000,
+     approvedDate: "2026-01-20", approvedBy: "Иванов А.С. (ЛПР)",
+     decisionId: "DEC-2026-003",
+     history: [
+       {date: "2026-01-20", action: "established", amount: 180000, by: "Иванов А.С. (ЛПР)"},
+     ],
+     activeAssignments: [],
+   }},
   {id:5, name:"ИП Козловский А.В.", unp:"790123456", role:"debtor", status:"rejected",
    regDate:"2026-03-18", director:"Козловский А.В.", limit:0, used:0,
    rate:0, scoringClass:"CC", scoringType:"full", riskLevel:"high",
-   scoring:{quantitative:28, qualitative:35, total:63, maxScore:200}},
+   scoring:{quantitative:28, qualitative:35, total:63, maxScore:200},
+   rolesOnPlatform: ["debtor"],
+   limitAsDebtor: {
+     total: 0, used: 0, available: 0,
+     approvedDate: null, approvedBy: null,
+     rejectedDate: "2026-03-19", rejectedBy: "Автоотказ (система)",
+     rejectReason: "Скоринг CC: отрицательная КИ + Легат issues",
+     history: [
+       {date: "2026-03-19", action: "rejected", amount: 0, by: "Автоотказ"},
+     ],
+     activeAssignments: [],
+   }},
   {id:6, name:"ООО «ГрандЛогистик»", unp:"690012345", role:"debtor", status:"active",
    regDate:"2026-01-15", director:"Лукашенко В.В.", limit:150000, used:25000,
    available:125000, rate:25, scoringClass:"A", scoringType:"full", riskLevel:"low",
-   scoring:{quantitative:72, qualitative:78, total:150, maxScore:200}},
+   scoring:{quantitative:72, qualitative:78, total:150, maxScore:200},
+   rolesOnPlatform: ["debtor"],
+   limitAsDebtor: {
+     total: 150000, used: 25000, available: 125000,
+     approvedDate: "2026-01-15", approvedBy: "Смирнов Д.К. (Аналитик, ≤50К не нужно ЛПР; здесь 150К одобрено через ЛПР)",
+     decisionId: "DEC-2026-002",
+     history: [
+       {date: "2026-01-15", action: "established", amount: 150000, by: "Иванов А.С. (ЛПР)"},
+     ],
+     activeAssignments: [],
+   }},
 ];
+
+// ═══════════════════════════════════════════════════════════
+// DEBTOR_INVITATIONS — приглашения должникам (Phase 0 нового workflow)
+// Кредитор отправляет ссылку своему контрагенту-должнику.
+// Должник проходит идентификацию + скоринг → банк устанавливает лимит → кредитор может создавать уступки.
+//
+// Жизненный цикл:
+//   sent → opened → registered → identified → scoring_in_progress → verified | rejected
+// ═══════════════════════════════════════════════════════════
+const DEBTOR_INVITATIONS = [
+  // Verified — должник прошёл всё, лимит установлен
+  {id:"INV-001", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"buh@beltechsnab.by", debtorPhone:"+375 17 234-56-78",
+   debtorCompanyHint:"ООО «БелТехСнаб»",
+   invitationLink:"https://oborotka.by/r/abc123def456",
+   sentAt:"2026-01-10 09:30",
+   status:"verified",
+   debtorCompanyId:2, // верифицированная компания (ID 2)
+   verifiedAt:"2026-01-15 14:22",
+   approvedLimit:200000,
+   approvedBy:"Иванов А.С. (ЛПР)"},
+
+  {id:"INV-002", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"office@stroyinv.by", debtorPhone:"+375 29 345-67-89",
+   debtorCompanyHint:"ЧУП «СтройИнвест»",
+   invitationLink:"https://oborotka.by/r/xyz789abc012",
+   sentAt:"2026-01-25 11:00",
+   status:"verified",
+   debtorCompanyId:3,
+   verifiedAt:"2026-02-01 10:45",
+   approvedLimit:150000,
+   approvedBy:"Иванов А.С. (ЛПР)"},
+
+  {id:"INV-003", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"sales@agrotrade.by", debtorPhone:"+375 33 456-78-90",
+   debtorCompanyHint:"ООО «АгроТрейд Плюс»",
+   invitationLink:"https://oborotka.by/r/mno234pqr567",
+   sentAt:"2026-01-15 14:20",
+   status:"verified",
+   debtorCompanyId:4,
+   verifiedAt:"2026-01-20 11:30",
+   approvedLimit:180000,
+   approvedBy:"Иванов А.С. (ЛПР)"},
+
+  // Rejected — скоринг отклонил
+  {id:"INV-004", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"info@kozlovsky.by", debtorPhone:"+375 44 567-89-01",
+   debtorCompanyHint:"ИП Козловский А.В.",
+   invitationLink:"https://oborotka.by/r/stu345vwx678",
+   sentAt:"2026-03-15 10:00",
+   status:"rejected",
+   debtorCompanyId:5,
+   rejectedAt:"2026-03-19 09:15",
+   rejectReason:"Скоринг класс CC: отрицательная КИ, Легат issues",
+   rejectedBy:"Автоотказ (система)"},
+
+  // In progress — скоринг должника идёт сейчас
+  {id:"INV-005", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"finance@grandlog.by", debtorPhone:"+375 25 678-90-12",
+   debtorCompanyHint:"ООО «ГрандЛогистик»",
+   invitationLink:"https://oborotka.by/r/yza456bcd789",
+   sentAt:"2026-01-12 16:00",
+   status:"verified",
+   debtorCompanyId:6,
+   verifiedAt:"2026-01-15 17:30",
+   approvedLimit:150000,
+   approvedBy:"Иванов А.С. (ЛПР)"},
+
+  // Sent (just sent, waiting) — пример "свежего" приглашения
+  {id:"INV-006", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"buh@dorstroy.by", debtorPhone:"+375 29 111-22-33",
+   debtorCompanyHint:"ООО «ДорСтрой»",
+   invitationLink:"https://oborotka.by/r/efg012hij345",
+   sentAt:"2026-03-25 10:15",
+   status:"sent",
+   debtorCompanyId:null, // ещё не зарегистрирован
+   openedAt:null},
+
+  // Opened (открыл ссылку, но не зарегистрировался)
+  {id:"INV-007", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"office@megastroy.by", debtorPhone:"+375 17 444-55-66",
+   debtorCompanyHint:"ЗАО «МегаСтрой»",
+   invitationLink:"https://oborotka.by/r/klm678nop901",
+   sentAt:"2026-03-23 09:00",
+   status:"opened",
+   debtorCompanyId:null,
+   openedAt:"2026-03-24 14:33"},
+
+  // Registered (зарегистрировался, проходит идентификацию)
+  {id:"INV-008", creditorId:1, creditorName:"ООО «СитиБетонСтрой»",
+   debtorEmail:"buh@promtorg.by", debtorPhone:"+375 33 777-88-99",
+   debtorCompanyHint:"ООО «ПромТорг»",
+   invitationLink:"https://oborotka.by/r/qrs234tuv567",
+   sentAt:"2026-03-20 11:30",
+   status:"identification_in_progress",
+   debtorCompanyId:null, // ещё не создана компания (создаётся после успешной идентификации)
+   openedAt:"2026-03-21 09:00",
+   registeredAt:"2026-03-22 13:45"},
+];
+
+// Status labels for UI
+const INVITATION_STATUS_LABELS = {
+  sent:                       {label:"Отправлено",                color:"#94A3B8", icon:"📨"},
+  opened:                     {label:"Открыл ссылку",              color:"#06B6D4", icon:"👁"},
+  registered:                 {label:"Зарегистрирован",            color:"#3B82F6", icon:"📝"},
+  identification_in_progress: {label:"Проходит идентификацию",     color:"#A855F7", icon:"🔍"},
+  scoring_in_progress:        {label:"Скоринг идёт",               color:"#7C3AED", icon:"📊"},
+  verified:                   {label:"Верифицирован",              color:"#059669", icon:"✓"},
+  rejected:                   {label:"Отклонён",                   color:"#DC2626", icon:"✗"},
+};
+
+// ═══════════════════════════════════════════════════════════
+// REPAYMENT_REGISTRY — реестр платежей от должников (Сессия 8 / Phase 5)
+// УСКО ежедневно утром загружает Excel-реестр из АБС банка с поступлениями.
+// Платформа сопоставляет каждое поступление с активной уступкой по:
+//   1) УНП должника
+//   2) Реквизиты транзитного счёта (3819...)
+//   3) Сумма платежа
+//   4) Назначение платежа (содержит № ДФ)
+// Совпавшие — автоматически закрываются (stage → assignment_closed).
+// Несовпавшие — попадают в очередь для ручного разбора УСКО.
+// ═══════════════════════════════════════════════════════════
+const REPAYMENT_REGISTRY = [
+  // Сегодняшняя выгрузка из АБС (mock — 26 марта 2026)
+  {id:"PAY-001", uploadedDate:"2026-03-26", uploadedBy:"Петрова Н.А.", uploadedAt:"2026-03-26 09:15",
+   payerUnp:"190456789", payerName:"ООО «БелТехСнаб»",
+   amount:45000,
+   paymentDate:"2026-03-25",
+   paymentReference:"Оплата по ДФ-2026-03-10-001 от ООО СитиБетонСтрой",
+   bankAccount:"3819000012345",
+   matchedAssignmentId:"ASG-001", // совпало с уступкой
+   matchStatus:"auto_matched",
+   confidence:100,
+   matchedAt:"2026-03-26 09:15:30"},
+
+  {id:"PAY-002", uploadedDate:"2026-03-26", uploadedBy:"Петрова Н.А.", uploadedAt:"2026-03-26 09:15",
+   payerUnp:"290123456", payerName:"ЧУП «СтройИнвест»",
+   amount:60000,
+   paymentDate:"2026-03-25",
+   paymentReference:"Возврат факторинга ДФ-2026-03-15-001",
+   bankAccount:"3819000012346",
+   matchedAssignmentId:null, // не совпало
+   matchStatus:"unmatched",
+   confidence:0,
+   suggestedAssignmentIds:["ASG-007"], // система предложила ручную проверку
+   reasonForUnmatched:"Сумма платежа меньше ожидаемой на 2 BYN (комиссия?)"},
+
+  {id:"PAY-003", uploadedDate:"2026-03-26", uploadedBy:"Петрова Н.А.", uploadedAt:"2026-03-26 09:15",
+   payerUnp:"390456789", payerName:"ООО «АгроТрейд Плюс»",
+   amount:120000,
+   paymentDate:"2026-03-25",
+   paymentReference:"Платеж от ООО АгроТрейд",
+   bankAccount:"3819000012347",
+   matchedAssignmentId:null,
+   matchStatus:"manual_review",
+   confidence:50,
+   suggestedAssignmentIds:[],
+   reasonForUnmatched:"Назначение платежа не содержит № ДФ — требуется ручное сопоставление"},
+
+  // Вчерашняя выгрузка
+  {id:"PAY-004", uploadedDate:"2026-03-25", uploadedBy:"Петрова Н.А.", uploadedAt:"2026-03-25 09:10",
+   payerUnp:"190456789", payerName:"ООО «БелТехСнаб»",
+   amount:30000,
+   paymentDate:"2026-03-24",
+   paymentReference:"Оплата по ДФ-2026-03-22-001",
+   bankAccount:"3819000012345",
+   matchedAssignmentId:"ASG-002",
+   matchStatus:"auto_matched",
+   confidence:100,
+   matchedAt:"2026-03-25 09:10:25"},
+
+  {id:"PAY-005", uploadedDate:"2026-03-25", uploadedBy:"Петрова Н.А.", uploadedAt:"2026-03-25 09:10",
+   payerUnp:"690012345", payerName:"ООО «ГрандЛогистик»",
+   amount:25000,
+   paymentDate:"2026-03-24",
+   paymentReference:"ДФ-2026-01-15-001 возврат",
+   bankAccount:"3819000012348",
+   matchedAssignmentId:"ASG-008",
+   matchStatus:"auto_matched",
+   confidence:100,
+   matchedAt:"2026-03-25 09:10:45"},
+];
+
+const REPAYMENT_MATCH_LABELS = {
+  auto_matched:  {label:"Автосовпадение", color:"#059669", icon:"✓"},
+  manual_review: {label:"Ручная проверка", color:"#EA580C", icon:"👁"},
+  unmatched:     {label:"Не совпало", color:"#DC2626", icon:"⚠"},
+  manually_matched:{label:"Сопоставлено вручную", color:"#0891B2", icon:"✋"},
+};
 
 const ALL_DEALS = [
   {id:"УС-2026-0042", creditorId:1, debtorId:2, amount:45000, shipDate:"2026-03-15",
@@ -662,66 +888,54 @@ const PIPELINE = [
      {action:"verified", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-23 14:22", comment:"Скоринг ок, клиент надёжный"},
    ]},
 
-  // contract_preparation
+  // analyst_verification — на 50K (граница, аналитик может одобрить сам)
   {id:"REQ-006", type:"debtor_scoring", company:"ООО «ТрансБел»", unp:"590123457",
-   creditorId:1, stage:"contract_preparation", stageStartDate:"2026-03-20", priority:"medium", created:"2026-03-18",
-   requestedAmount:100000, tier:"extended", scoringClass:"A", scoringTotal:162,
-   approvedLimit:100000, approvedRate:25, decisionDate:"2026-03-20", decisionBy:"Иванов А.С. (ЛПР)",
-   accountNumber:"",
-   docs:{consentBki:true, legat:true, balanceOpu:true, decision:"signed"},
-   comments:[{user:"Иванов А.С.",date:"2026-03-20",text:"Одобрено 100K. Ожидаем формирования ген.договора."}],
+   creditorId:1, stage:"analyst_verification", stageStartDate:"2026-03-20", priority:"medium", created:"2026-03-20",
+   requestedAmount:50000, tier:"simple", scoringClass:"A", scoringTotal:162,
+   docs:{consentBki:true, legat:true},
+   comments:[],
    history:[
-     {action:"created", user:"Система", userRole:null, date:"2026-03-18 09:00"},
-     {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-18 09:02"},
-     {action:"verified", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-19 11:30", comment:null},
-     {action:"approved", user:"Иванов А.С.", userRole:"lpr", date:"2026-03-20 10:15", comment:"Одобрено 100K"},
+     {action:"created", user:"Система", userRole:null, date:"2026-03-20 09:00"},
+     {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-20 09:02"},
    ]},
 
-  // contract_signing
+  // lpr_decision — крупная сумма >50К, передано ЛПР
   {id:"REQ-007", type:"debtor_scoring", company:"ЧУП «СтройАктив»", unp:"190345678",
-   creditorId:1, stage:"contract_signing", stageStartDate:"2026-03-19", priority:"medium", created:"2026-03-16",
-   requestedAmount:45000, tier:"simple", scoringClass:"B", scoringTotal:130,
-   approvedLimit:45000, approvedRate:25, decisionDate:"2026-03-18", decisionBy:"Смирнов Д.К. (Аналитик)",
-   accountNumber:"3819000012345",
-   docs:{consentBki:true, legat:true, decision:"signed", generalContract:"pending_bank"},
-   comments:[{user:"Петрова Н.А.",date:"2026-03-19",text:"Ген.договор сформирован, номер счёта 3819000012345. Передан на подпись."}],
+   creditorId:1, stage:"lpr_decision", stageStartDate:"2026-03-19", priority:"high", created:"2026-03-18",
+   requestedAmount:75000, tier:"extended", scoringClass:"A", scoringTotal:155,
+   docs:{consentBki:true, legat:true, balanceOpu:true},
+   comments:[{user:"Смирнов Д.К.",date:"2026-03-19",text:"Передано ЛПР, сумма >50К. Скоринг чистый, рекомендую одобрить."}],
    history:[
-     {action:"created", user:"Система", userRole:null, date:"2026-03-16 10:00"},
-     {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-16 10:01"},
-     {action:"approved", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-18 12:00", comment:null},
-     {action:"contract_generated", user:"Петрова Н.А.", userRole:"usko_prepare", date:"2026-03-19 09:15", comment:"Счёт из АБС"},
+     {action:"created", user:"Система", userRole:null, date:"2026-03-18 10:00"},
+     {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-18 10:01"},
+     {action:"verified", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-19 11:30", comment:"Передано ЛПР"},
    ]},
 
-  // client_signing
+  // client_activation — одобрено, ждёт активации
   {id:"REQ-008", type:"debtor_scoring", company:"ООО «БелТехСнаб»", unp:"190456789",
-   creditorId:1, stage:"client_signing", stageStartDate:"2026-03-16", priority:"low", created:"2026-03-14",
+   creditorId:1, stage:"client_activation", stageStartDate:"2026-03-16", priority:"medium", created:"2026-03-14",
    requestedAmount:35000, tier:"simple", scoringClass:"A", scoringTotal:150,
-   approvedLimit:35000, approvedRate:25, accountNumber:"3819000012346",
-   docs:{consentBki:true, legat:true, decision:"signed", generalContract:"signed_bank"},
-   comments:[{user:"Подписант",date:"2026-03-16",text:"Договор подписан банком, отправлен клиенту."}],
+   approvedLimit:35000, approvedRate:25, decisionDate:"2026-03-15", decisionBy:"Смирнов Д.К. (Аналитик)",
+   docs:{consentBki:true, legat:true, decision:"signed"},
+   comments:[{user:"Смирнов Д.К.",date:"2026-03-15",text:"Одобрен лимит 35K. Ставка 25%."}],
    history:[
      {action:"created", user:"Система", userRole:null, date:"2026-03-14 11:30"},
      {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-14 11:31"},
-     {action:"approved", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-15 10:00", comment:null},
-     {action:"contract_generated", user:"Петрова Н.А.", userRole:"usko_prepare", date:"2026-03-15 14:20", comment:null},
-     {action:"contract_signed_bank", user:"Татьяна К.", userRole:"signer", date:"2026-03-16 09:00", comment:null},
+     {action:"approved", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-15 10:00", comment:"Одобрено 35K"},
    ]},
 
-  // client_activation
+  // client_activation — одобрено ЛПР, ждёт активации УСКО
   {id:"REQ-009", type:"debtor_scoring", company:"ООО «АгроТрейд»", unp:"390456789",
    creditorId:1, stage:"client_activation", stageStartDate:"2026-03-12", priority:"medium", created:"2026-03-10",
    requestedAmount:60000, tier:"extended", scoringClass:"A", scoringTotal:158,
-   approvedLimit:60000, approvedRate:25, accountNumber:"3819000012347",
-   docs:{consentBki:true, legat:true, decision:"signed", generalContract:"signed_all"},
-   comments:[{user:"Клиент",date:"2026-03-12",text:"Договор подписан клиентом ЭЦП."}],
+   approvedLimit:60000, approvedRate:25, decisionDate:"2026-03-11", decisionBy:"Иванов А.С. (ЛПР)",
+   docs:{consentBki:true, legat:true, decision:"signed"},
+   comments:[{user:"Иванов А.С.",date:"2026-03-11",text:"Одобрено ЛПР, лимит 60K. Передано УСКО для активации."}],
    history:[
      {action:"created", user:"Система", userRole:null, date:"2026-03-10 14:00"},
      {action:"scoring_completed", user:"Автоматика", userRole:null, date:"2026-03-10 14:01"},
      {action:"verified", user:"Смирнов Д.К.", userRole:"analyst", date:"2026-03-10 16:30", comment:null},
-     {action:"approved", user:"Иванов А.С.", userRole:"lpr", date:"2026-03-11 10:00", comment:null},
-     {action:"contract_generated", user:"Петрова Н.А.", userRole:"usko_prepare", date:"2026-03-11 14:00", comment:null},
-     {action:"contract_signed_bank", user:"Татьяна К.", userRole:"signer", date:"2026-03-12 09:30", comment:null},
-     {action:"contract_signed_client", user:"ООО «АгроТрейд»", userRole:null, date:"2026-03-12 15:00", comment:null},
+     {action:"approved", user:"Иванов А.С.", userRole:"lpr", date:"2026-03-11 10:00", comment:"Одобрено 60K"},
    ]},
 
   // active
@@ -771,7 +985,7 @@ const PIPELINE = [
 const ASSIGNMENTS = [
   // ═══ Closed successfully (debtor paid — полный цикл) ═══
   {id:"ASG-001", dealId:"REQ-010", creditorId:1, debtorId:2, amount:45000, discount:2774, toReceive:42226,
-   stage:"debtor_paid", stageStartDate:"2026-03-20", createdDate:"2026-03-10", shippingDate:"2026-03-08",
+   stage:"assignment_closed", stageStartDate:"2026-03-20", createdDate:"2026-03-10", shippingDate:"2026-03-08",
    ttnNumber:"ТТН-45",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-12",
    dsNumber:"ДС-REQ-010-001", dsDate:"2026-03-12",
@@ -804,7 +1018,7 @@ const ASSIGNMENTS = [
 
   // ═══ Paid to client, awaiting debtor payment (normal cycle) ═══
   {id:"ASG-007", dealId:"REQ-010", creditorId:1, debtorId:2, amount:52000, discount:3200, toReceive:48800,
-   stage:"awaiting_debtor", stageStartDate:"2026-03-20", createdDate:"2026-03-15", shippingDate:"2026-03-13",
+   stage:"awaiting_debtor_payment", stageStartDate:"2026-03-20", createdDate:"2026-03-15", shippingDate:"2026-03-13",
    ttnNumber:"ТТН-55",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-17",
    dsNumber:"ДС-REQ-010-007", dsDate:"2026-03-17",
@@ -868,8 +1082,28 @@ const ASSIGNMENTS = [
 
   // UCKO check — SLA bank
   {id:"ASG-002", dealId:"REQ-010", creditorId:1, debtorId:2, amount:30000,
-   stage:"usko_checking", stageStartDate:"2026-03-24", createdDate:"2026-03-22",
+   stage:"usko_review", stageStartDate:"2026-03-24", createdDate:"2026-03-22",
    ttnNumber:"ТТН-48",
+   // ─── НОВАЯ МОДЕЛЬ ───
+   dfNumber:"ДФ-2026-03-22-001", dfDate:"2026-03-22",
+   rate:25, termDays:60, discount:1233, toReceive:28767,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-48", amount:18000, shipDate:"2026-03-22", description:"Бетон М-300, 50 м³"},
+     {ttnNumber:"ТТН-48А", amount:12000, shipDate:"2026-03-22", description:"Бетон М-300, 30 м³"},
+   ],
+   signatures:{
+     bank:        {signed:false, signedBy:null, signedAt:null, certNumber:null},
+     creditor_df: {signed:false, signedAt:null},
+     creditor_act:{signed:false, signedAt:null},
+     debtor_act:  {signed:true, signedAt:"2026-03-24 11:30"}, // должник подписал акт сверки заранее
+     debtor_notification:{signed:false, signedAt:null},
+   },
+   financing:{
+     accountNumber:null,
+     authorizationDate:null,
+     disbursedDate:null,
+     disbursedBy:null,
+   },
    docs:{
      dkp:{status:"signed",date:"2026-03-22"}, ttn:{status:"signed",date:"2026-03-22"},
      actReconciliation:{status:"signed",date:"2026-03-24",signedBy:"ООО «БелТехСнаб»"},
@@ -882,7 +1116,7 @@ const ASSIGNMENTS = [
 
   // Debtor confirming (client waiting, opened but didn't sign)
   {id:"ASG-003", dealId:"REQ-010", creditorId:1, debtorId:4, amount:25000,
-   stage:"debtor_confirming", stageStartDate:"2026-03-23", createdDate:"2026-03-23",
+   stage:"debtor_signing", stageStartDate:"2026-03-23", createdDate:"2026-03-23",
    ttnNumber:"ТТН-49",
    docs:{dkp:{status:"signed"}, ttn:{status:"signed"}},
    clientActivity:{
@@ -896,10 +1130,29 @@ const ASSIGNMENTS = [
 
   // Signer — bank SLA critical
   {id:"ASG-004", dealId:"REQ-010", creditorId:1, debtorId:2, amount:18000, discount:1110, toReceive:16890,
-   stage:"ds_signing_bank", stageStartDate:"2026-03-23", createdDate:"2026-03-22", shippingDate:"2026-03-20",
+   stage:"df_signing_bank", stageStartDate:"2026-03-23", createdDate:"2026-03-22", shippingDate:"2026-03-20",
    ttnNumber:"ТТН-50",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-24",
    dsNumber:"ДС-REQ-010-004", dsDate:"2026-03-25",
+   // ─── НОВАЯ МОДЕЛЬ ───
+   dfNumber:"ДФ-2026-03-22-002", dfDate:"2026-03-22",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-50", amount:18000, shipDate:"2026-03-20", description:"Бетон М-300, 50 м³"},
+   ],
+   signatures:{
+     bank:        {signed:false, signedBy:null, signedAt:null, certNumber:null}, // Татьяна должна подписать
+     creditor_df: {signed:false, signedAt:null},
+     creditor_act:{signed:false, signedAt:null},
+     debtor_act:  {signed:true, signedAt:"2026-03-23 11:00"},
+     debtor_notification:{signed:false, signedAt:null},
+   },
+   financing:{
+     accountNumber:null, // будет получен после АБС
+     authorizationDate:null,
+     disbursedDate:null,
+     disbursedBy:null,
+   },
    docs:{
      dkp:{status:"signed"}, ttn:{status:"signed"}, actReconciliation:{status:"signed"},
      supplementaryAgreement:{status:"pending_bank", number:"ДС-REQ-010-004"},
@@ -913,7 +1166,7 @@ const ASSIGNMENTS = [
 
   // Returned to supplier
   {id:"ASG-005", dealId:"REQ-010", creditorId:1, debtorId:2, amount:12000,
-   stage:"returned_to_supplier", stageStartDate:"2026-03-24", createdDate:"2026-03-23",
+   stage:"returned_to_creditor", stageStartDate:"2026-03-24", createdDate:"2026-03-23",
    ttnNumber:"ТТН-51",
    returnReason:{issues:["ttn_illegible","dkp_missing"], comment:"ТТН нечитаемая, ДКП не приложен", returnedBy:"Петрова Н.А.", returnedAt:"2026-03-24 14:00"},
    docs:{ttn:{status:"uploaded_with_issues"}},
@@ -924,7 +1177,7 @@ const ASSIGNMENTS = [
 
   // DS signing client — waiting, didn't open
   {id:"ASG-006", dealId:"REQ-010", creditorId:1, debtorId:2, amount:22000, discount:1356, toReceive:20644,
-   stage:"ds_signing_client", stageStartDate:"2026-03-18", createdDate:"2026-03-18", shippingDate:"2026-03-15",
+   stage:"df_signing_creditor", stageStartDate:"2026-03-18", createdDate:"2026-03-18", shippingDate:"2026-03-15",
    ttnNumber:"ТТН-52",
    uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-18",
    dsNumber:"ДС-REQ-010-006", dsDate:"2026-03-18",
@@ -936,10 +1189,212 @@ const ASSIGNMENTS = [
    history:[
      {action:"ds_signed_bank",user:"Татьяна К.",userRole:"signer",date:"2026-03-18 11:00"},
    ]},
+
+  // ═══ ASG-010: debtor_scoring (Phase 0 — аналитик) ═══
+  {id:"ASG-010", dealId:"INV-008", creditorId:1, debtorId:null, amount:0,
+   stage:"debtor_scoring", stageStartDate:"2026-03-25", createdDate:"2026-03-22",
+   debtorInvitationId:"INV-008",
+   debtorCompanyHint:"ООО «ПромТорг»",
+   completedTasks:{
+     check_kr: {at:"2026-03-25 10:30", by:"Смирнов Д.К."},
+   },
+   history:[
+     {action:"invitation_sent",user:"ООО «СитиБетонСтрой»",date:"2026-03-20 11:30"},
+     {action:"debtor_identified",user:"ООО «ПромТорг»",date:"2026-03-22 13:45"},
+     {action:"scoring_started",user:"Смирнов Д.К.",userRole:"analyst",date:"2026-03-25 10:00"},
+   ]},
+
+  // ═══ ASG-011: lpr_decision_assignment (>50K, ждёт ЛПР) ═══
+  {id:"ASG-011", dealId:"REQ-010", creditorId:1, debtorId:4, amount:75000, discount:3082, toReceive:71918,
+   stage:"lpr_decision_assignment", stageStartDate:"2026-03-26", createdDate:"2026-03-25",
+   dfNumber:"ДФ-2026-03-25-001", dfDate:"2026-03-25",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-60", amount:50000, shipDate:"2026-03-23", description:"Бетон М-400, 100 м³"},
+     {ttnNumber:"ТТН-61", amount:25000, shipDate:"2026-03-23", description:"Арматура А500, 5 т"},
+   ],
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-26",
+   completedTasks:{
+     review_compliance: {at:"2026-03-26 14:30", by:"Иванов А.С."},
+   },
+   docs:{
+     dkp:{status:"signed",date:"2026-03-25"}, ttn:{status:"signed",date:"2026-03-25"},
+   },
+   signatures:{
+     bank:        {signed:false, signedBy:null, signedAt:null, certNumber:null},
+     creditor_df: {signed:false, signedAt:null},
+     creditor_act:{signed:false, signedAt:null},
+     debtor_act:  {signed:false, signedAt:null},
+     debtor_notification:{signed:false, signedAt:null},
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",date:"2026-03-25 14:00"},
+     {action:"checked_ok",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-26 14:00",comment:"Сумма 75К > 50К → ЛПР"},
+   ]},
+
+  // ═══ ASG-012: abs_card_creation (УСКО заполняет АБС) ═══
+  {id:"ASG-012", dealId:"REQ-010", creditorId:1, debtorId:3, amount:35000, discount:1438, toReceive:33562,
+   stage:"abs_card_creation", stageStartDate:"2026-03-26", createdDate:"2026-03-25",
+   dfNumber:"ДФ-2026-03-25-002", dfDate:"2026-03-25",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-62", amount:35000, shipDate:"2026-03-24", description:"Цемент ПЦ-500, 70 т"},
+   ],
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-26",
+   completedTasks:{
+     create_creditor_card: {at:"2026-03-26 10:15", by:"Петрова Н.А."},
+     create_debtor_card:   {at:"2026-03-26 10:25", by:"Петрова Н.А."},
+   },
+   docs:{
+     dkp:{status:"signed"}, ttn:{status:"signed"},
+   },
+   signatures:{
+     bank:{signed:false}, creditor_df:{signed:false}, creditor_act:{signed:false},
+     debtor_act:{signed:false}, debtor_notification:{signed:false},
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",date:"2026-03-25 09:00"},
+     {action:"checked_ok",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-25 11:00"},
+   ]},
+
+  // ═══ ASG-013: df_generation (платформа генерирует ДФ) ═══
+  {id:"ASG-013", dealId:"REQ-010", creditorId:1, debtorId:6, amount:18000, discount:740, toReceive:17260,
+   stage:"df_generation", stageStartDate:"2026-03-26", createdDate:"2026-03-24",
+   dfNumber:"ДФ-2026-03-24-001", dfDate:"2026-03-24",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-63", amount:18000, shipDate:"2026-03-22", description:"Песок строительный, 90 т"},
+   ],
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-25",
+   accountNumber:"3819000056789",
+   completedTasks:{},
+   docs:{
+     dkp:{status:"signed"}, ttn:{status:"signed"},
+   },
+   signatures:{
+     bank:{signed:false}, creditor_df:{signed:false}, creditor_act:{signed:false},
+     debtor_act:{signed:false}, debtor_notification:{signed:false},
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",date:"2026-03-24 13:00"},
+     {action:"checked_ok",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-25 09:30"},
+     {action:"abs_filled",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-26 10:00",comment:"Счёт АБС: 3819000056789"},
+   ]},
+
+  // ═══ ASG-014: payment_authorization (УСКО оформляет распоряжение) ═══
+  {id:"ASG-014", dealId:"REQ-010", creditorId:1, debtorId:2, amount:42000, discount:1726, toReceive:40274,
+   stage:"payment_authorization", stageStartDate:"2026-03-26", createdDate:"2026-03-20",
+   dfNumber:"ДФ-2026-03-20-001", dfDate:"2026-03-20",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-64", amount:42000, shipDate:"2026-03-18", description:"Бетон М-300, 105 м³"},
+   ],
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-21",
+   accountNumber:"3819000067890",
+   completedTasks:{},
+   docs:{
+     dkp:{status:"signed"}, ttn:{status:"signed"},
+     supplementaryAgreement:{status:"signed_all", date:"2026-03-25"},
+   },
+   signatures:{
+     bank:        {signed:true, signedBy:"Татьяна К.", signedAt:"2026-03-22 10:00", certNumber:"GS-CERT-2026-AAA"},
+     creditor_df: {signed:true, signedAt:"2026-03-23 14:00"},
+     creditor_act:{signed:true, signedAt:"2026-03-23 14:00"},
+     debtor_act:  {signed:true, signedAt:"2026-03-25 11:30"},
+     debtor_notification:{signed:true, signedAt:"2026-03-25 11:30"},
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",date:"2026-03-20 09:00"},
+     {action:"checked_ok",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-21 11:00"},
+     {action:"abs_filled",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-22 09:00"},
+     {action:"df_generated",user:"Платформа",userRole:"system",date:"2026-03-22 09:30"},
+     {action:"df_signed_bank",user:"Татьяна К.",userRole:"signer",date:"2026-03-22 10:00"},
+     {action:"df_signed_creditor",user:"ООО «СитиБетонСтрой»",userRole:"supplier",date:"2026-03-23 14:00"},
+     {action:"debtor_signed",user:"ООО «БелТехСнаб»",userRole:"debtor",date:"2026-03-25 11:30"},
+   ]},
+
+  // ═══ ASG-015: payment_disbursed (УСКО подтверждает выдачу) ═══
+  {id:"ASG-015", dealId:"REQ-010", creditorId:1, debtorId:6, amount:28000, discount:1151, toReceive:26849,
+   stage:"payment_disbursed", stageStartDate:"2026-03-26", createdDate:"2026-03-19",
+   dfNumber:"ДФ-2026-03-19-001", dfDate:"2026-03-19",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-65", amount:28000, shipDate:"2026-03-17", description:"Кирпич М-150, 14000 шт"},
+   ],
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-20",
+   accountNumber:"3819000078901",
+   completedTasks:{
+     check_abs_disbursed: {at:"2026-03-26 12:30", by:"Петрова Н.А."},
+   },
+   docs:{
+     dkp:{status:"signed"}, ttn:{status:"signed"},
+     supplementaryAgreement:{status:"signed_all"},
+   },
+   signatures:{
+     bank:        {signed:true, signedBy:"Татьяна К.", signedAt:"2026-03-21 10:00"},
+     creditor_df: {signed:true, signedAt:"2026-03-22 14:00"},
+     creditor_act:{signed:true, signedAt:"2026-03-22 14:00"},
+     debtor_act:  {signed:true, signedAt:"2026-03-24 11:00"},
+     debtor_notification:{signed:true, signedAt:"2026-03-24 11:00"},
+   },
+   financing:{
+     accountNumber:"3819000078901",
+     authorizationDate:"2026-03-25",
+     disbursedDate:null,
+     disbursedBy:null,
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",date:"2026-03-19 09:00"},
+     {action:"payment_authorized",user:"Петрова Н.А.",userRole:"usko_prepare",date:"2026-03-25 16:00",comment:"Распоряжение в АБС"},
+   ]},
+
+  // ═══ ASG-016: assignment_created (только что создана кредитором, ждёт УСКО) ═══
+  {id:"ASG-016", dealId:"REQ-010", creditorId:1, debtorId:2, amount:15000, discount:616, toReceive:14384,
+   stage:"usko_review", stageStartDate:"2026-03-26", createdDate:"2026-03-26",
+   dfNumber:"ДФ-2026-03-26-001", dfDate:"2026-03-26",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-66", amount:15000, shipDate:"2026-03-25", description:"Цемент М-500, 30 т"},
+   ],
+   completedTasks:{},
+   docs:{
+     dkp:{status:"signed",date:"2026-03-26"}, ttn:{status:"signed",date:"2026-03-26"},
+   },
+   signatures:{
+     bank:{signed:false}, creditor_df:{signed:false}, creditor_act:{signed:false},
+     debtor_act:{signed:false}, debtor_notification:{signed:false},
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",userRole:"supplier",date:"2026-03-26 09:30",comment:"Создана через личный кабинет"},
+   ]},
+
+  // ═══ ASG-017: ещё одна df_signing_bank — для демо «несколько на одном этапе» ═══
+  {id:"ASG-017", dealId:"REQ-010", creditorId:1, debtorId:3, amount:12000, discount:493, toReceive:11507,
+   stage:"df_signing_bank", stageStartDate:"2026-03-25", createdDate:"2026-03-23",
+   dfNumber:"ДФ-2026-03-23-001", dfDate:"2026-03-23",
+   rate:25, termDays:60,
+   ttnRegistry:[
+     {ttnNumber:"ТТН-67", amount:12000, shipDate:"2026-03-22", description:"Бетон М-200, 30 м³"},
+   ],
+   uskoTakenBy:"Петрова Н.А.", uskoTakenDate:"2026-03-24",
+   accountNumber:"3819000089012",
+   completedTasks:{},
+   docs:{
+     dkp:{status:"signed"}, ttn:{status:"signed"},
+   },
+   signatures:{
+     bank:{signed:false}, creditor_df:{signed:false}, creditor_act:{signed:false},
+     debtor_act:{signed:false}, debtor_notification:{signed:false},
+   },
+   history:[
+     {action:"assignment_created",user:"ООО «СитиБетонСтрой»",date:"2026-03-23 10:00"},
+     {action:"df_generated",user:"Платформа",date:"2026-03-25 09:00"},
+   ]},
 ];
 
 // ─── NOTIFICATIONS ───
 const NOTIFICATIONS = [
+  // ═══ Pipeline notifications ═══
   {id:"n1", userRole:"analyst", type:"new_task",
    title:"Новая заявка на верификацию", subtext:"REQ-003 · ООО «ТехноГрупп» · 180 000 BYN",
    link:{page:"pipeline", reqId:"REQ-003"}, createdAt:"2026-03-26 10:30", read:false},
@@ -947,26 +1402,53 @@ const NOTIFICATIONS = [
    title:"Новая заявка на верификацию", subtext:"REQ-004 · ИП Сергеев В.А. · 40 000 BYN",
    link:{page:"pipeline", reqId:"REQ-004"}, createdAt:"2026-03-26 09:15", read:false},
   {id:"n3", userRole:"lpr", type:"new_task",
-   title:"Заявка на принятие решения", subtext:"REQ-005 · ООО «АтомСтрой» · 250 000 BYN",
+   title:"Заявка на принятие решения (>50K)", subtext:"REQ-005 · ООО «АтомСтрой» · 250 000 BYN",
    link:{page:"pipeline", reqId:"REQ-005"}, createdAt:"2026-03-26 11:00", read:false},
   {id:"n4", userRole:"usko_prepare", type:"new_task",
-   title:"Заявка на оформление договора", subtext:"REQ-006 · ООО «ТрансБел» · 100 000 BYN",
-   link:{page:"pipeline", reqId:"REQ-006"}, createdAt:"2026-03-25 16:22", read:false},
+   title:"Клиент готов к активации", subtext:"REQ-008 · ООО «БелТехСнаб» · скоринг A · 35K",
+   link:{page:"pipeline", reqId:"REQ-008"}, createdAt:"2026-03-25 16:22", read:false},
+
+  // ═══ Phase 0: Скоринг должника (новые) ═══
+  {id:"n11", userRole:"analyst", type:"new_task",
+   title:"Должник прошёл идентификацию — скоринг", subtext:"INV-008 · ООО «ПромТорг» от ООО «СитиБетонСтрой»",
+   link:{page:"clients", tab:"invitations"}, createdAt:"2026-03-26 11:30", read:false, isNewWorkflow:true},
+
+  // ═══ Phase 1: Уступки в проверке УСКО (новый flow) ═══
   {id:"n5", userRole:"usko_prepare", type:"new_task",
-   title:"Новая уступка на проверку", subtext:"ASG-002 · 30 000 BYN",
-   link:{page:"assignments", asgId:"ASG-002"}, createdAt:"2026-03-26 08:30", read:false},
-  {id:"n6", userRole:"usko_prepare", type:"client_waiting_long",
-   title:"Клиент не отвечает 8 дней", subtext:"ASG-006 · ожидание подписи ДС",
-   link:{page:"assignments", asgId:"ASG-006"}, createdAt:"2026-03-26 09:00", read:false},
+   title:"Новая уступка на проверку (ДКП + ТТН)", subtext:"ASG-002 · ООО «БелТехСнаб» · 30 000 BYN",
+   link:{page:"assignments", asgId:"ASG-002"}, createdAt:"2026-03-26 08:30", read:false, isNewWorkflow:true},
+
+  // ═══ Phase 1: ЛПР по уступке (>50K, новое compliance требование) ═══
+  {id:"n12", userRole:"lpr", type:"new_task",
+   title:"⚠ Уступка >50K на решение ЛПР (compliance)", subtext:"ASG-NEW-001 · 75 000 BYN · ст. 121 БК",
+   link:{page:"assignments"}, createdAt:"2026-03-26 13:15", read:false, isNewWorkflow:true},
+
+  // ═══ Phase 2: АБС + ДФ ═══
+  {id:"n13", userRole:"usko_prepare", type:"new_task",
+   title:"Заполнить карточки в АБС", subtext:"ASG-002 · одобрено УСКО, нужны 3 карточки",
+   link:{page:"assignments", asgId:"ASG-002"}, createdAt:"2026-03-26 14:00", read:false, isNewWorkflow:true},
+
+  // ═══ Подписание ═══
   {id:"n7", userRole:"signer", type:"new_task",
-   title:"Документ на подпись ЭЦП", subtext:"REQ-007 · ЧУП «СтройАктив»",
-   link:{page:"pipeline", reqId:"REQ-007"}, createdAt:"2026-03-26 10:00", read:false},
-  {id:"n8", userRole:"signer", type:"new_task",
-   title:"ДС на подпись ЭЦП", subtext:"ASG-004 · 18 000 BYN",
-   link:{page:"assignments", asgId:"ASG-004"}, createdAt:"2026-03-25 14:30", read:false},
-  {id:"n9", userRole:"signer", type:"sla_warning",
-   title:"SLA банка близок к лимиту", subtext:"ASG-004 · на этапе 2 дня (лимит 1д)",
+   title:"ДФ на подпись ЭЦП банка", subtext:"ASG-004 · 18 000 BYN · ДФ-2026-03-22-002",
+   link:{page:"assignments", asgId:"ASG-004"}, createdAt:"2026-03-25 14:30", read:false, isNewWorkflow:true},
+  {id:"n8", userRole:"signer", type:"sla_warning",
+   title:"SLA банка близок к лимиту", subtext:"ASG-004 · на этапе подписи 2 дня",
    link:{page:"assignments", asgId:"ASG-004"}, createdAt:"2026-03-26 12:00", read:false},
+  {id:"n6", userRole:"usko_prepare", type:"client_waiting_long",
+   title:"Кредитор не подписал 3 дня", subtext:"ASG-006 · ожидание подписи ДФ + акта",
+   link:{page:"assignments", asgId:"ASG-006"}, createdAt:"2026-03-26 09:00", read:false},
+
+  // ═══ Финансирование (новый последний шаг УСКО) ═══
+  {id:"n14", userRole:"usko_prepare", type:"new_task",
+   title:"💰 Подтвердить выдачу финансирования", subtext:"После выдачи в АБС — нажать «Финансирование выдано»",
+   link:{page:"assignments"}, createdAt:"2026-03-26 15:30", read:false, isNewWorkflow:true},
+
+  // ═══ Recover phase ═══
+  {id:"n15", userRole:"credit_ops", type:"new_task",
+   title:"⚠ Просрочка должника", subtext:"ASG-008 · 25 000 BYN · 28 дней просрочки",
+   link:{page:"assignments", asgId:"ASG-008"}, createdAt:"2026-03-26 09:00", read:false},
+
   {id:"n10", userRole:"admin", type:"sla_breach",
    title:"SLA банка нарушен", subtext:"ASG-004 · подписант тянет",
    link:{page:"assignments", asgId:"ASG-004"}, createdAt:"2026-03-26 09:00", read:false},
@@ -1038,20 +1520,6 @@ const AUDIT_LOG = [
    affectedSubject:{type:"client", id:1, unp:"169066611"},
    dataAccessed:["limit","rate","passport"],
    details:{limit:500000}},
-  // ═══ Compliance-specific logs (NEW) ═══
-  {id:"log-11", date:"2026-04-15 10:30:00", userId:8, userName:"Соколова О.А.", userRole:"compliance_officer",
-   action:"pdn_access", objectType:"client", objectId:"1",
-   severity:"warning", category:"client_data",
-   ipAddress:"10.0.0.8", userAgent:"Chrome/131 Win11",
-   affectedSubject:{type:"client", id:1, unp:"169066611", name:"ООО «СитиБетонСтрой»"},
-   dataAccessed:["fio","passport","beneficiaries","financials"],
-   details:{purpose:"Плановая проверка комплаенс согласно п.4.2 регламента"}},
-  {id:"log-12", date:"2026-04-15 10:35:00", userId:8, userName:"Соколова О.А.", userRole:"compliance_officer",
-   action:"kr_inquiry", objectType:"client", objectId:"1",
-   severity:"info", category:"external_request",
-   ipAddress:"10.0.0.8", userAgent:"Chrome/131 Win11",
-   affectedSubject:{type:"client", id:1, unp:"169066611"},
-   details:{reportId:"KR-2026-001234", purpose:"Обновление кредитной истории"}},
   {id:"log-13", date:"2026-03-15 09:00:00", userId:1, userName:"Дерябина О.Н. (клиент)", userRole:"supplier",
    action:"consent_signed", objectType:"consent", objectId:"CONS-001",
    severity:"info", category:"consent",
@@ -1059,12 +1527,6 @@ const AUDIT_LOG = [
    signedWithECP:true, certSerialNumber:"0xA1B2C3D4E5F6",
    affectedSubject:{type:"client", id:1, unp:"169066611"},
    details:{consentType:"pdn_processing", method:"ECP_GOSSUOK"}},
-  {id:"log-14", date:"2026-04-20 11:15:00", userId:9, userName:"Гончарова Н.В.", userRole:"dpo",
-   action:"subject_request_received", objectType:"client", objectId:"1",
-   severity:"warning", category:"consent",
-   ipAddress:"10.0.0.9", userAgent:"Chrome/131 Win11",
-   affectedSubject:{type:"client", id:1, unp:"169066611"},
-   details:{requestType:"data_access_request", articleZ99:"ст.10 Закона 99-З"}},
 ];
 
 // ─── Audit log helpers (compliance) ───
@@ -1634,8 +2096,9 @@ const SCORING_QUALITATIVE = [
 
 const BANK_NAV = [
   {id:"dashboard", label:"Дашборд", icon:LayoutDashboard},
-  {id:"pipeline", label:"Кредитный конвейер", icon:Zap, badge:11},
+  {id:"pipeline", label:"Скоринг клиентов", icon:Zap, badge:11},
   {id:"assignments", label:"Уступки", icon:Package, badge:5},
+  {id:"repayments", label:"Погашения", icon:RefreshCw, badge:3},
   {id:"clients", label:"Клиенты", icon:Users},
   {id:"portfolio", label:"Портфель", icon:TrendingUp},
   {id:"documents", label:"Документы", icon:Archive},
@@ -1670,11 +2133,9 @@ const BANK_USERS = [
   {id:2, name:"Иванов А.С.", position:"Начальник упр. финансирования", role:"lpr", email:"ivanov@neobank.by", status:"active"},
   {id:3, name:"Петрова Н.А.", position:"Специалист УСКО (оформление)", role:"usko_prepare", email:"petrova@neobank.by", status:"active"},
   {id:4, name:"Татьяна К.", position:"Замначальника (доверенность)", role:"signer", email:"tatyana@neobank.by", status:"active"},
-  {id:5, name:"Козлова Е.В.", position:"Руководитель / Комплаенс", role:"admin", email:"kozlova@neobank.by", status:"active"},
+  {id:5, name:"Козлова Е.В.", position:"Руководитель", role:"admin", email:"kozlova@neobank.by", status:"active"},
   {id:6, name:"Ковалёв И.В.", position:"Кредитный менеджер (возврат)", role:"credit_ops", email:"kovalev@neobank.by", status:"active"},
   {id:7, name:"Кузнецов А.П.", position:"Юрист (взыскание)", role:"legal", email:"kuznetsov@neobank.by", status:"active"},
-  {id:8, name:"Соколова О.А.", position:"Комплаенс-офицер", role:"compliance_officer", email:"sokolova@neobank.by", status:"active"},
-  {id:9, name:"Гончарова Н.В.", position:"DPO — Уполномоченная по защите ПДн", role:"dpo", email:"goncharova@neobank.by", status:"active"},
 ];
 
 // ─── UTILS ───
@@ -1781,7 +2242,7 @@ function generatePaymentSchedule(asg) {
     const due = new Date(asg.dueDate);
     const daysUntilDue = Math.ceil((due - today) / 86400000);
     let status = "pending";
-    if (asg.stage === "debtor_paid") status = "paid";
+    if (asg.stage === "assignment_closed") status = "paid";
     else if (asg.stage === "debtor_overdue" || asg.stage === "debtor_defaulted") status = "overdue";
 
     schedule.push({
@@ -2141,6 +2602,61 @@ const Card = ({children, className="", ...rest}) => (
   <div className={`bg-white rounded-2xl border border-slate-200 ${className}`} {...rest}>{children}</div>
 );
 
+// ─── Collapsible — accordion для документов/подписей/истории ───
+function Collapsible({title, subtitle, icon, badge, count, defaultOpen = false, children, color}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return <Card className="overflow-hidden mb-3">
+    <button onClick={() => setOpen(!open)}
+      className="w-full flex items-center justify-between gap-3 px-4 py-3 hover:bg-slate-50 transition-colors text-left">
+      <div className="flex items-center gap-2.5 min-w-0">
+        {icon && <span className="text-lg shrink-0">{icon}</span>}
+        <div className="min-w-0">
+          <div className="text-xs font-bold flex items-center gap-2" style={{color: color || "#0F172A"}}>
+            {title}
+            {count != null && <span className="text-[10px] px-1.5 py-0.5 rounded font-bold" style={{background: (color || "#1E40AF") + "15", color: color || "#1E40AF"}}>
+              {count}
+            </span>}
+            {badge && <span className="text-[9px] px-1.5 py-0.5 rounded font-bold" style={{background: badge.bg, color: badge.color}}>
+              {badge.label}
+            </span>}
+          </div>
+          {subtitle && <div className="text-[10px] mt-0.5" style={{color: "#94A3B8"}}>{subtitle}</div>}
+        </div>
+      </div>
+      <ChevronDown size={14} style={{color: "#94A3B8", transform: open ? "rotate(180deg)" : "none", transition: "transform 0.2s"}}/>
+    </button>
+    {open && <div className="px-4 pb-4 pt-1 border-t" style={{borderColor: "#E2E8F0"}}>
+      {children}
+    </div>}
+  </Card>;
+}
+
+// ─── Skeleton — для loading-состояний таблиц и карточек ───
+const Skeleton = ({className = "", width = "100%", height = "16px", rounded = true}) => (
+  <div className={`animate-pulse ${className}`}
+    style={{
+      width,
+      height,
+      background: "linear-gradient(90deg, #F1F5F9 0%, #E2E8F0 50%, #F1F5F9 100%)",
+      borderRadius: rounded ? 6 : 0,
+    }}/>
+);
+
+const SkeletonRow = ({cols = 5}) => (
+  <tr className="border-b" style={{borderColor: "#E2E8F0"}}>
+    {[...Array(cols)].map((_, i) => <td key={i} className="px-4 py-3">
+      <Skeleton height="12px" width={i === 0 ? "60%" : i === cols - 1 ? "50%" : "80%"}/>
+    </td>)}
+  </tr>
+);
+
+const SkeletonCard = ({lines = 3}) => (
+  <Card className="p-4 space-y-2">
+    <Skeleton height="14px" width="40%"/>
+    {[...Array(lines)].map((_, i) => <Skeleton key={i} height="11px" width={`${85 - i * 10}%`}/>)}
+  </Card>
+);
+
 const Btn = ({children, variant = "primary", size = "md", onClick, disabled, icon: Icon, className = "", rateLimit = 500}) => {
   const [cooldown, setCooldown] = useState(false);
   const base = "inline-flex items-center justify-center gap-2 font-semibold rounded-xl transition-all duration-200 whitespace-nowrap";
@@ -2495,6 +3011,30 @@ function NotificationBell({currentUser, notifications, onNotificationClick}) {
     ? notifs
     : notifs.filter(n => n.userRole === currentUser.role);
 
+  // Sort by priority: SLA breaches first, then new workflow, then by date (newest first)
+  const TYPE_PRIORITY = {
+    sla_breach: 100,
+    sla_warning: 90,
+    client_waiting_long: 80,
+    new_task: 50,
+    returned: 60,
+    stage_complete: 30,
+    comment_added: 20,
+  };
+  const myNotifsSorted = [...myNotifs].sort((a, b) => {
+    // 1) Unread first
+    if (a.read !== b.read) return a.read ? 1 : -1;
+    // 2) New workflow notifications get a boost
+    const aBoost = a.isNewWorkflow ? 10 : 0;
+    const bBoost = b.isNewWorkflow ? 10 : 0;
+    // 3) Type priority
+    const aPri = (TYPE_PRIORITY[a.type] || 0) + aBoost;
+    const bPri = (TYPE_PRIORITY[b.type] || 0) + bBoost;
+    if (aPri !== bPri) return bPri - aPri;
+    // 4) Date desc
+    return (b.createdAt || "").localeCompare(a.createdAt || "");
+  });
+
   const unread = myNotifs.filter(n => !n.read);
   const unreadCount = unread.length;
 
@@ -2540,9 +3080,9 @@ function NotificationBell({currentUser, notifications, onNotificationClick}) {
             {unreadCount > 0 && <button onClick={markAllRead} className="text-[10px] font-semibold hover:underline" style={{color:B.accent}}>Очистить все</button>}
           </div>
           <div className="overflow-y-auto" style={{maxHeight:400}}>
-            {myNotifs.length === 0 ? (
+            {myNotifsSorted.length === 0 ? (
               <div className="p-8 text-center text-sm" style={{color:B.t3}}>Нет уведомлений</div>
-            ) : myNotifs.slice(0, 10).map(notif => (
+            ) : myNotifsSorted.slice(0, 10).map(notif => (
               <button key={notif.id} onClick={()=>handleClick(notif)}
                 className="w-full flex items-start gap-2.5 px-4 py-3 hover:bg-slate-50 text-left border-b last:border-0"
                 style={{borderColor:B.border, background:notif.read?"white":"#F0F9FF"}}>
@@ -2550,7 +3090,10 @@ function NotificationBell({currentUser, notifications, onNotificationClick}) {
                 {notif.read && <div className="w-1.5 h-1.5 shrink-0"/>}
                 <span className="text-base shrink-0">{typeIcons[notif.type]||"📬"}</span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold" style={{color:B.t1}}>{notif.title}</div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <div className="text-xs font-bold" style={{color:B.t1}}>{notif.title}</div>
+                    {notif.isNewWorkflow && <span className="text-[8px] px-1 py-0.5 rounded font-bold" style={{background:B.accentL, color:B.accent}}>NEW</span>}
+                  </div>
                   <div className="text-[11px] mt-0.5 truncate" style={{color:B.t2}}>{notif.subtext}</div>
                   <div className="text-[10px] mt-0.5" style={{color:B.t3}}>{timeAgo(notif.createdAt)}</div>
                 </div>
@@ -3139,6 +3682,7 @@ function AppInner() {
           {active==="clients"&&<ClientsPage currentUser={currentUser} pushNav={pushNav} setToast={setToast}/>}
           {active==="client-detail"&&<ClientDetailPage popNav={popNav} pushNav={pushNav} setToast={setToast}/>}
           {active==="portfolio"&&<PortfolioPage pushNav={pushNav} setToast={setToast}/>}
+          {active==="repayments"&&<RepaymentsPage popNav={popNav} setToast={setToast} currentUser={currentUser}/>}
           {active==="deal-detail"&&<DealDetailPage popNav={popNav} setToast={setToast}/>}
           {active==="documents"&&<DocumentsPage currentUser={currentUser} setToast={setToast}/>}
           {active==="stoplist"&&<StoplistPage setToast={setToast}/>}
@@ -3235,7 +3779,7 @@ function AppInner() {
               <div className="space-y-2">
                 {[
                   {keys: ["G", "D"], desc: "Дашборд"},
-                  {keys: ["G", "P"], desc: "Кредитный конвейер (Pipeline)"},
+                  {keys: ["G", "P"], desc: "Скоринг клиентов (Pipeline)"},
                   {keys: ["G", "A"], desc: "Уступки (Assignments)"},
                   {keys: ["G", "C"], desc: "Клиенты (Clients)"},
                   {keys: ["G", "R"], desc: "Портфель (poRtfolio)"},
@@ -3298,14 +3842,29 @@ function DashboardPage({pushNav, setToast, currentUser}) {
   const waitingWarning = waitingAsgs.filter(a => getClientWaitLevel(a)==="warning");
 
   // ─── Recover phase metrics — deals where we paid client, awaiting debtor ───
-  const awaitingDebtorAsgs = ASSIGNMENTS.filter(a => a.stage === "awaiting_debtor");
+  const awaitingDebtorAsgs = ASSIGNMENTS.filter(a => a.stage === "awaiting_debtor_payment");
   const awaitingDebtorAmount = awaitingDebtorAsgs.reduce((s, a) => s + (a.amount || 0), 0);
   const debtorOverdueAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_overdue");
   const debtorOverdueAmount = debtorOverdueAsgs.reduce((s, a) => s + (a.amount || 0), 0);
   const debtorDefaultedAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_defaulted");
   const debtorDefaultedAmount = debtorDefaultedAsgs.reduce((s, a) => s + (a.amount || 0), 0);
-  const closedSuccessAsgs = ASSIGNMENTS.filter(a => a.stage === "debtor_paid");
+  const closedSuccessAsgs = ASSIGNMENTS.filter(a => a.stage === "assignment_closed");
   const totalEarnedFromClosed = closedSuccessAsgs.reduce((s, a) => s + (a.bankEarned || 0), 0);
+
+  // ─── Сессия 7: Финансирование metrics (новый workflow) ───
+  // Уступки в pre-financing pipeline (от создания до payment_disbursed)
+  const inProgressFactoring = ASSIGNMENTS.filter(a => [
+    "usko_review", "lpr_decision_assignment", "abs_card_creation",
+    "df_generation", "df_signing_bank", "df_signing_creditor", "debtor_signing",
+    "payment_authorization", "payment_disbursed",
+  ].includes(a.stage));
+  const inProgressFactoringAmount = inProgressFactoring.reduce((s, a) => s + (a.toReceive || a.amount || 0), 0);
+  // Сегодня выданное финансирование (mock — в реальности из АБС)
+  const todayDisbursedAsgs = ASSIGNMENTS.filter(a => a.stage === "awaiting_debtor_payment" && a.financing?.disbursedDate === "2026-03-26");
+  const todayDisbursedAmount = todayDisbursedAsgs.reduce((s, a) => s + (a.toReceive || 0), 0);
+  // Verified debtors count (от приглашений)
+  const verifiedDebtorsCount = DEBTOR_INVITATIONS.filter(i => i.status === "verified").length;
+  const pendingDebtorsCount = DEBTOR_INVITATIONS.filter(i => ["sent", "opened", "registered", "identification_in_progress", "scoring_in_progress"].includes(i.status)).length;
 
   const pieDataTerms = [
     {name:"30 дней", value: activeDeals.filter(d=>d.term<=30).reduce((s,d)=>s+d.amount,0)||15000, fill:B.accent},
@@ -3325,6 +3884,78 @@ function DashboardPage({pushNav, setToast, currentUser}) {
 
   return <div>
     <PageHeader title="Дашборд" breadcrumbs={["Главная"]}/>
+
+    {/* ═══ HERO: Финансирование сегодня (главный блок дня) ═══ */}
+    <Card className="p-5 mb-5 relative overflow-hidden" style={{
+      background: "linear-gradient(135deg, white 0%, " + B.greenL + " 100%)",
+      borderColor: B.green + "30",
+      borderWidth: 2,
+    }}>
+      <div className="absolute top-0 right-0 w-40 h-40 opacity-5 rounded-bl-full" style={{background: B.green}}/>
+
+      <div className="flex items-start justify-between gap-4 mb-4 relative">
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.green}}>
+            💰 Финансирование сегодня
+          </div>
+          <div className="text-base font-black mt-0.5" style={{color: B.t1}}>
+            Состояние процесса на {new Date("2026-03-26").toLocaleDateString("ru", {day: "numeric", month: "long"})}
+          </div>
+        </div>
+        <Btn size="sm" variant="ghost" icon={ArrowRight}
+          onClick={() => pushNav && pushNav({page: "assignments"})}>
+          Все уступки
+        </Btn>
+      </div>
+
+      <div className="grid grid-cols-4 gap-3 relative">
+        <Card className="p-3" style={{background: "white"}}>
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{background: "#FAF5FF"}}>
+              <span style={{fontSize: 12}}>👥</span>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>Должников</div>
+          </div>
+          <div className="text-xl font-black" style={{color: B.t1}}>{verifiedDebtorsCount}</div>
+          <div className="text-[10px] mt-0.5" style={{color: B.t2}}>верифицировано · +{pendingDebtorsCount} ждут</div>
+        </Card>
+
+        <Card className="p-3" style={{background: "white"}}>
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{background: B.accentL}}>
+              <FileText size={12} style={{color: B.accent}}/>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>В работе</div>
+          </div>
+          <div className="text-xl font-black" style={{color: B.t1}}>{inProgressFactoring.length}</div>
+          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(inProgressFactoringAmount)}</div>
+        </Card>
+
+        <Card className="p-3" style={{background: "white"}}>
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{background: "#EEF2FF"}}>
+              <Pen size={12} style={{color: "#6366F1"}}/>
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>Ждут подписи</div>
+          </div>
+          <div className="text-xl font-black" style={{color: B.t1}}>
+            {ASSIGNMENTS.filter(a => ["df_signing_bank", "df_signing_creditor", "debtor_signing"].includes(a.stage)).length}
+          </div>
+          <div className="text-[10px] mt-0.5" style={{color: B.t2}}>ДФ + акт</div>
+        </Card>
+
+        <Card className="p-3" style={{background: B.greenL, borderColor: B.green + "30"}}>
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{background: "white"}}>
+              <span style={{fontSize: 12}}>💸</span>
+            </div>
+            <div className="text-[10px]" style={{color: B.green}}>Выдано сегодня</div>
+          </div>
+          <div className="text-xl font-black" style={{color: B.green}}>{todayDisbursedAsgs.length}</div>
+          <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>{fmtByn(todayDisbursedAmount)}</div>
+        </Card>
+      </div>
+    </Card>
 
     <div className="grid grid-cols-2 gap-4 mb-4">
       <KPICard label="Активный портфель" value={fmtByn(totalPortfolio)}
@@ -3347,6 +3978,69 @@ function DashboardPage({pushNav, setToast, currentUser}) {
         periodValue={fmtByn(Math.round(bankIncome / 1.08))}
         tooltip="15.5% от суммы дисконтов"/>
     </div>
+
+    {/* ─── Распределение уступок по этапам конвейера (визуализация затора) ─── */}
+    <Card className="p-4 mb-6" style={{background: "white"}}>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wider flex items-center gap-2" style={{color: B.t1}}>
+            <span className="text-base">📊</span>
+            Распределение по этапам конвейера
+          </h3>
+          <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+            Где сейчас застревает работа — толщина сегмента = количество уступок
+          </div>
+        </div>
+        <Btn size="sm" variant="ghost" icon={GitBranch}
+          onClick={() => pushNav && pushNav({page: "assignments"})}>
+          Воронка
+        </Btn>
+      </div>
+
+      {/* Stage breakdown progress bar */}
+      <div>
+        <div className="flex items-center gap-1 h-3 rounded-full overflow-hidden" style={{background: "#F1F5F9"}}>
+          {[
+            {stage: "usko_review", color: B.orange, label: "УСКО"},
+            {stage: "lpr_decision_assignment", color: "#6366F1", label: "ЛПР"},
+            {stage: "abs_card_creation", color: B.orange, label: "АБС"},
+            {stage: "df_generation", color: B.accent, label: "ДФ"},
+            {stage: "df_signing_bank", color: "#06B6D4", label: "Банк"},
+            {stage: "df_signing_creditor", color: "#0891B2", label: "Кредитор"},
+            {stage: "debtor_signing", color: "#A855F7", label: "Должник"},
+            {stage: "payment_authorization", color: B.orange, label: "Платёж"},
+            {stage: "payment_disbursed", color: B.green, label: "Выдача"},
+          ].map(s => {
+            const count = ASSIGNMENTS.filter(a => a.stage === s.stage).length;
+            if (count === 0) return null;
+            const percent = (count / Math.max(1, inProgressFactoring.length)) * 100;
+            return <div key={s.stage}
+              title={`${s.label}: ${count}`}
+              style={{width: `${percent}%`, background: s.color, minWidth: 6}}/>;
+          })}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-[10px]">
+          {[
+            {stage: "usko_review", color: B.orange, label: "Проверка УСКО"},
+            {stage: "lpr_decision_assignment", color: "#6366F1", label: "ЛПР"},
+            {stage: "abs_card_creation", color: B.orange, label: "АБС"},
+            {stage: "df_generation", color: B.accent, label: "Формирование ДФ"},
+            {stage: "df_signing_bank", color: "#06B6D4", label: "Подпись банка"},
+            {stage: "df_signing_creditor", color: "#0891B2", label: "Подпись кредитора"},
+            {stage: "debtor_signing", color: "#A855F7", label: "Подпись должника"},
+            {stage: "payment_authorization", color: B.orange, label: "Распоряжение"},
+            {stage: "payment_disbursed", color: B.green, label: "Выдача"},
+          ].map(s => {
+            const count = ASSIGNMENTS.filter(a => a.stage === s.stage).length;
+            if (count === 0) return null;
+            return <div key={s.stage} className="flex items-center gap-1">
+              <div className="w-2 h-2 rounded-full" style={{background: s.color}}/>
+              <span style={{color: B.t2}}>{s.label}: <strong>{count}</strong></span>
+            </div>;
+          })}
+        </div>
+      </div>
+    </Card>
 
     {/* ─── Recover phase row — возврат средств от должников ─── */}
     <Card className="p-4 mb-6" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
@@ -3467,22 +4161,19 @@ function DashboardPage({pushNav, setToast, currentUser}) {
 // PIPELINE v2 — CRM FUNNEL (50K threshold)
 // ═══════════════════════════════════════
 
-// Stages (CRM-style, 11 etaпов + 2 side: rejected/grey_zone)
+// ─── PIPELINE_STAGES — упрощённый скоринг клиентов ───
+// По итогам встречи в банке: убираем contract_preparation/contract_signing/client_signing.
+// «Кредитный конвейер» = подтверждение скоринга. ГДФ как сущность отменяется.
+// Этапы: верификация аналитика → ЛПР (если >50К) → активация → активный клиент.
 const PIPELINE_STAGES = [
   {id:"analyst_verification",label:"Верификация аналитика",color:B.purple,role:"analyst",
    description:"Кредитный аналитик верифицирует скоринг. ≤50K → подписывает решение. >50K → передаёт ЛПР"},
   {id:"lpr_decision",label:"Решение ЛПР",color:"#6366F1",role:"lpr",
    description:"Лицо принимающее решение (только для >50K). Подписывает Решение ЭЦП"},
-  {id:"contract_preparation",label:"Подготовка договора",color:B.accent,role:"usko_prepare",
-   description:"УСКО вносит номер счёта из АБС, генерирует ген.договор факторинга"},
-  {id:"contract_signing",label:"Подписание банком",color:"#06B6D4",role:"signer",
-   description:"Подписант подписывает ген.договор ЭЦП"},
-  {id:"client_signing",label:"Подписание клиентом",color:"#0891B2",role:"client",
-   description:"Клиент получает договор, подписывает ЭЦП в своём кабинете"},
-  {id:"client_activation",label:"Активация клиента",color:B.orange,role:"usko_activate",
-   description:"УСКО активирует клиента в АБС → клиент получает доступ к созданию уступок"},
+  {id:"client_activation",label:"Активация клиента",color:B.orange,role:"usko_prepare",
+   description:"УСКО подтверждает скоринг и активирует клиента → может создавать уступки"},
   {id:"active",label:"Активный клиент",color:B.green,role:"—",
-   description:"Клиент активен — может создавать уступки по лимиту ген.договора факторинга"},
+   description:"Клиент прошёл скоринг и может создавать уступки по своему лимиту"},
   {id:"rejected",label:"Отклонено",color:B.red,role:"—",
    description:"Отклонено системой или решением"},
   {id:"grey_zone",label:"Серая зона",color:"#6B7280",role:"—",
@@ -3492,9 +4183,7 @@ const PIPELINE_STAGES = [
 const PIPELINE_ROLES = {
   analyst:{label:"Кредитный аналитик",short:"Аналитик",color:B.accent,icon:"👤"},
   lpr:{label:"Лицо принимающее решение (>50K)",short:"ЛПР",color:B.purple,icon:"✍️"},
-  usko_prepare:{label:"УСКО — подготовка договора",short:"УСКО (оформ.)",color:B.orange,icon:"📄"},
-  signer:{label:"Подписант договоров",short:"Подписант",color:"#06B6D4",icon:"🔏"},
-  usko_activate:{label:"УСКО — активация",short:"УСКО (актив.)",color:B.green,icon:"⚡"},
+  usko_prepare:{label:"УСКО — активация",short:"УСКО",color:B.orange,icon:"⚡"},
   all:{label:"Все роли",short:"Все",color:B.t2,icon:"👥"},
 };
 
@@ -3512,12 +4201,19 @@ const SCORING_ZONES = {
 const DOC_KEY_LABELS = {
   consentBki:"Согласие БКИ",consent_bki:"Согласие БКИ",legat:"Выписка Легат",bki:"Кредитный отчёт БКИ",
   balance:"Баланс ОПУ",balanceQ4:"Баланс ОПУ (послед. квартал)",balanceOpu:"Баланс ОПУ",pl:"Баланс ОПУ",
-  decision:"Решение о предоставлении факторинга",generalContract:"Генеральный договор факторинга",
-  supAg:"Допсоглашение",ttn:"ТТН (товарно-транспортная накладная)",esfchf:"ЭСЧФ",
-  dkp:"Договор купли-продажи",notification:"Уведомление должнику",
+  decision:"Решение о предоставлении факторинга",
+  generalContract:"Генеральный договор факторинга (legacy — отменён в новой схеме)",
+  supAg:"Допсоглашение (legacy)",
+  ttn:"ТТН (товарно-транспортная накладная)",esfchf:"ЭСЧФ",
+  dkp:"Договор купли-продажи",notification:"Уведомление об уступке прав требования",
   anketa:"Анкета (Прил.12)",consentOeb:"Согласие ОЭБ",consent_oeb:"Согласие ОЭБ",
   dkp_doc:"Договор купли-продажи (ДКП)",actReconciliation:"Акт сверки",
-  supplementaryAgreement:"Допсоглашение к ГД",
+  supplementaryAgreement:"Допсоглашение к ГД (legacy)",
+  // ─── НОВЫЕ ДОКУМЕНТЫ (по итогам встречи в банке) ───
+  factoringContract:"Договор факторинга (1 страничка, на день)",
+  paymentAuthorization:"Распоряжение на выдачу финансирования",
+  offer:"Оферта (общие условия на сайте банка)",
+  ttnRegistry:"Реестр ТТН за день",
 };
 
 // Return-to-USKO issue types (from signer)
@@ -3544,59 +4240,214 @@ const SUPPLIER_RETURN_ISSUES = {
 // ═══════════════════════════════════════
 // ASSIGNMENTS (Branch 6) — constants
 // ═══════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// ASSIGNMENT_STAGES — НОВАЯ СТРУКТУРА (по итогам встречи в банке)
+// 16 этапов в 5 фазах. Главные изменения:
+//   • Phase 0 (НОВОЕ): Верификация должника — кредитор приглашает должника, он проходит идентификацию + скоринг
+//   • ГДФ (Генеральный договор) ОТМЕНЁН — каждая уступка = отдельный договор факторинга на 1 страничку
+//   • На каждый ДФ: подписание банком → кредитором (ДФ + акт сверки) → должником (акт сверки + уведомление)
+//   • Финансирование: УСКО оформляет распоряжение → нажимает кнопку "финансирование выдано"
+//   • Recover-фаза: ожидание от должника → просрочка → дефолт → закрыто
+// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// ASSIGNMENT_STAGES — короткие названия для воронки
+// Внутри каждого этапа лежат ЗАДАЧИ (см. ASSIGNMENT_TASKS ниже),
+// которые двигают уступку с одного этапа на другой.
+// ═══════════════════════════════════════════════════════════
 const ASSIGNMENT_STAGES = [
-  {id:"docs_received", label:"Документы от поставщика", color:"#D97706", role:"system", actor:"supplier", phase:"docs",
-    actionHint:"Поставщик загружает ДКП, ТТН, ЭСЧФ", whoActs:"👤 Поставщик"},
-  {id:"debtor_notified", label:"Уведомление должнику", color:"#0891B2", role:"system", actor:"platform", phase:"docs",
-    actionHint:"Платформа автоматически отправляет уведомление", whoActs:"⚙ Платформа"},
-  {id:"debtor_confirming", label:"Подпись должника", color:"#06B6D4", role:"debtor", actor:"debtor", phase:"docs",
-    actionHint:"Должник подтверждает получение товара в своём кабинете", whoActs:"🚚 Должник"},
-  {id:"usko_checking", label:"Проверка комплекта", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"check",
-    actionHint:"УСКО: проверить ДКП, ТТН, ЭСЧФ → принять комплект (или вернуть поставщику)", whoActs:"🏦 УСКО-специалист"},
-  {id:"returned_to_supplier", label:"Возврат поставщику", color:"#DC2626", role:"supplier", actor:"supplier", phase:"check",
-    actionHint:"Поставщик исправляет комплект и загружает заново", whoActs:"👤 Поставщик"},
-  {id:"ds_preparing", label:"Формирование ДС", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"sign",
-    actionHint:"УСКО: сформировать ДС (платформа генерирует автоматически)", whoActs:"🏦 УСКО-специалист"},
-  {id:"ds_signing_bank", label:"Подпись ДС банком", color:"#06B6D4", role:"signer", actor:"bank", phase:"sign",
-    actionHint:"Подписант: подписать ДС ЭЦП банка (PIN)", whoActs:"🏦 Подписант банка"},
-  {id:"ds_signing_client", label:"Подпись ДС клиентом", color:"#0891B2", role:"supplier", actor:"supplier", phase:"sign",
-    actionHint:"Клиент подписывает ДС ЭЦП в своём кабинете", whoActs:"👤 Клиент (поставщик)"},
-  {id:"payment_approved", label:"Разрешение на оплату", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"pay",
-    actionHint:"УСКО: проверить реквизиты → разрешить оплату в АБС", whoActs:"🏦 УСКО-специалист"},
-  {id:"paid", label:"Оплачено клиенту", color:"#0891B2", role:"—", actor:"system", phase:"pay",
-    actionHint:"Средства поступили поставщику. Ожидаем возврат от должника", whoActs:"⚙ Система → 🚚 Должник"},
+  // ═══ Phase 0: Верификация должника ═══
+  {id:"debtor_invitation_sent", label:"Приглашение", color:"#9333EA", role:"system", actor:"platform", phase:"verify_debtor",
+    actionHint:"Кредитор отправил должнику ссылку на регистрацию", whoActs:"⚙ Платформа"},
+  {id:"debtor_identification", label:"Идентификация", color:"#A855F7", role:"system", actor:"debtor", phase:"verify_debtor",
+    actionHint:"Должник проходит идентификацию через МСИ или агента", whoActs:"🚚 Должник"},
+  {id:"debtor_scoring", label:"Скоринг должника", color:"#7C3AED", role:"analyst", actor:"bank", phase:"verify_debtor",
+    actionHint:"Аналитик проверяет скоринг должника, определяет лимит (объём)", whoActs:"🏦 Аналитик"},
+  {id:"debtor_verified", label:"Верифицирован", color:"#059669", role:"system", actor:"system", phase:"verify_debtor",
+    actionHint:"Лимит установлен, кредитор уведомлён — может создавать уступки", whoActs:"⚙ Система"},
 
-  // ═══ Recover phase — фаза возврата средств от должника ═══
-  {id:"awaiting_debtor", label:"Ждём оплату от должника", color:"#6366F1", role:"system", actor:"debtor", phase:"recover",
-    actionHint:"Должник должен перечислить средства банку до срока платежа", whoActs:"🚚 Должник"},
-  {id:"debtor_overdue", label:"Просрочка должника", color:"#DC2626", role:"credit_ops", actor:"bank", phase:"recover",
-    actionHint:"Кредитный менеджер: напомнить / предъявить претензию / эскалировать", whoActs:"🏦 Кредитный менеджер"},
-  {id:"debtor_defaulted", label:"Дефолт — юр.отдел", color:"#991B1B", role:"legal", actor:"bank", phase:"recover",
+  // ═══ Phase 1: Создание уступки ═══
+  {id:"assignment_created", label:"Создана", color:"#D97706", role:"system", actor:"supplier", phase:"create",
+    actionHint:"Кредитор создал уступку: загрузил ДКП, реестр ТТН за день", whoActs:"👤 Кредитор"},
+  {id:"usko_review", label:"Проверка УСКО", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"create",
+    actionHint:"УСКО проверяет ДКП/ТТН + сверяет сумму с лимитом должника", whoActs:"🏦 УСКО"},
+  {id:"lpr_decision_assignment", label:"Решение ЛПР", color:"#6366F1", role:"lpr", actor:"bank", phase:"create",
+    actionHint:"ЛПР принимает решение по уступке (требование compliance: на каждый ДФ)", whoActs:"🏦 ЛПР"},
+
+  // ═══ Phase 2: Оформление в АБС + договор факторинга ═══
+  {id:"abs_card_creation", label:"АБС", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"abs",
+    actionHint:"УСКО заполняет карточки в АБС: кредитор + должник + договор факторинга", whoActs:"🏦 УСКО"},
+  {id:"df_generation", label:"Формирование ДФ", color:"#0891B2", role:"usko_prepare", actor:"bank", phase:"abs",
+    actionHint:"Платформа генерирует договор факторинга (1 страничка) + акт сверки", whoActs:"🏦 УСКО"},
+  {id:"df_signing_bank", label:"Подпись банка", color:"#06B6D4", role:"signer", actor:"bank", phase:"abs",
+    actionHint:"Уполномоченное лицо банка подписывает ДФ ЭЦП", whoActs:"🏦 Подписант банка"},
+
+  // ═══ Phase 3: Подписание клиентами ═══
+  {id:"df_signing_creditor", label:"Подпись кредитора", color:"#0891B2", role:"supplier", actor:"supplier", phase:"sign",
+    actionHint:"Кредитор подписывает 2 документа одновременно: ДФ + акт сверки", whoActs:"👤 Кредитор"},
+  {id:"debtor_signing", label:"Подпись должника", color:"#06B6D4", role:"debtor", actor:"debtor", phase:"sign",
+    actionHint:"Должник подписывает 2 документа: акт сверки + уведомление об уступке прав", whoActs:"🚚 Должник"},
+
+  // ═══ Phase 4: Финансирование ═══
+  {id:"payment_authorization", label:"Распоряжение", color:"#EA580C", role:"usko_prepare", actor:"bank", phase:"pay",
+    actionHint:"УСКО оформляет распоряжение на выдачу финансирования + график платежей", whoActs:"🏦 УСКО"},
+  {id:"payment_disbursed", label:"Выдача", color:"#059669", role:"usko_prepare", actor:"bank", phase:"pay",
+    actionHint:"УСКО подтверждает выдачу средств клиенту (нажатие кнопки после АБС)", whoActs:"🏦 УСКО"},
+
+  // ═══ Phase 5: Возврат от должника (Recover) ═══
+  {id:"awaiting_debtor_payment", label:"Ждём платёж", color:"#6366F1", role:"system", actor:"debtor", phase:"recover",
+    actionHint:"Должник должен перечислить средства банку до срока (60 дней)", whoActs:"🚚 Должник"},
+  {id:"assignment_closed", label:"Закрыта", color:"#059669", role:"—", actor:"system", phase:"recover",
+    actionHint:"Должник погасил, уступка закрыта успешно. Банк заработал дисконт", whoActs:"⚙ Система"},
+
+  // ═══ Особые этапы (вне линейного потока) ═══
+  {id:"debtor_overdue", label:"Просрочка", color:"#DC2626", role:"credit_ops", actor:"bank", phase:"recover",
+    actionHint:"Кредитный менеджер: напоминание / претензия / эскалация", whoActs:"🏦 Кредитный менеджер"},
+  {id:"debtor_defaulted", label:"Дефолт", color:"#991B1B", role:"legal", actor:"bank", phase:"recover",
     actionHint:"Передача дела в юр.отдел для взыскания через суд", whoActs:"🏦 Юр.отдел"},
-  {id:"debtor_paid", label:"Должник погасил — уступка закрыта", color:"#059669", role:"—", actor:"system", phase:"recover",
-    actionHint:"Средства получены, уступка закрыта успешно. Банк заработал дисконт", whoActs:"⚙ Система"},
+  {id:"returned_to_creditor", label:"Возврат кредитору", color:"#DC2626", role:"supplier", actor:"supplier", phase:"create",
+    actionHint:"УСКО вернул уступку: исправить документы и загрузить заново", whoActs:"👤 Кредитор"},
 ];
 
-// ─── 5 логических фаз для UI (раньше было 4 — добавлена "recover") ───
+// ═══════════════════════════════════════════════════════════
+// ASSIGNMENT_TASKS — задачи внутри каждого этапа.
+// Каждая задача:
+//   • привязана к stage (когда уступка на этом этапе — задача активна)
+//   • имеет owner role (кто должен выполнить)
+//   • имеет action label + onComplete next stage
+// Когда все обязательные задачи stage'а выполнены → stage переходит на nextStage.
+// ═══════════════════════════════════════════════════════════
+const ASSIGNMENT_TASKS = {
+  // ─── Phase 0 ───
+  debtor_scoring: [
+    {id:"check_kr",          label:"Проверить кредитную историю (КР/БКИ)",   role:"analyst", required:true, durationMin:5,   icon:"📊"},
+    {id:"check_legat",       label:"Проверить выписку Легат",                role:"analyst", required:true, durationMin:3,   icon:"📋"},
+    {id:"check_balance",     label:"Анализ баланса и ОПУ",                   role:"analyst", required:true, durationMin:10,  icon:"💼"},
+    {id:"set_debtor_limit",  label:"Установить лимит (объём) должнику",      role:"analyst", required:true, durationMin:2,   icon:"💰", isFinal:true, nextStage:"debtor_verified"},
+  ],
+
+  // ─── Phase 1 ───
+  usko_review: [
+    {id:"check_dkp",         label:"Проверить ДКП (договор купли-продажи)",  role:"usko_prepare", required:true, durationMin:3, icon:"📄"},
+    {id:"check_ttn",         label:"Проверить реестр ТТН за день",           role:"usko_prepare", required:true, durationMin:5, icon:"🚚"},
+    {id:"check_eschf",       label:"Проверить ЭСЧФ (электронный счёт-фактура)", role:"usko_prepare", required:true, durationMin:2, icon:"🧾"},
+    {id:"verify_debtor_limit", label:"Сверить сумму с лимитом должника",     role:"usko_prepare", required:true, durationMin:1, icon:"⚖", isFinal:true,
+     // smart routing: ≤50K → abs_card_creation, >50K → lpr_decision_assignment
+     nextStage:"_smart_route_by_amount"},
+  ],
+
+  lpr_decision_assignment: [
+    {id:"review_compliance", label:"Compliance-проверка (ст. 121 БК)",       role:"lpr", required:true, durationMin:5,  icon:"🛡"},
+    {id:"check_debtor_history", label:"История работы с должником",          role:"lpr", required:true, durationMin:3,  icon:"📚"},
+    {id:"sign_decision",     label:"Подписать решение ЭЦП",                  role:"lpr", required:true, durationMin:1,  icon:"✍", isFinal:true, nextStage:"abs_card_creation"},
+  ],
+
+  // ─── Phase 2 ───
+  abs_card_creation: [
+    {id:"create_creditor_card", label:"Создать карточку кредитора в АБС",    role:"usko_prepare", required:true, durationMin:5, icon:"🏢"},
+    {id:"create_debtor_card",   label:"Создать карточку должника в АБС",     role:"usko_prepare", required:true, durationMin:5, icon:"🚚"},
+    {id:"create_factoring_card",label:"Создать карточку договора факторинга", role:"usko_prepare", required:true, durationMin:5, icon:"📋"},
+    {id:"get_account_3819",  label:"Получить номер счёта 3819 из АБС",       role:"usko_prepare", required:true, durationMin:2, icon:"💳", isFinal:true, nextStage:"df_generation"},
+  ],
+
+  df_generation: [
+    {id:"fetch_abs_data",    label:"Загрузить данные из АБС",                role:"usko_prepare", required:true, durationMin:1, icon:"📥"},
+    {id:"generate_df",       label:"Сгенерировать ДФ (1 страничка) + акт сверки", role:"usko_prepare", required:true, durationMin:1, icon:"📄"},
+    {id:"send_to_signer",    label:"Передать подписанту банка",              role:"usko_prepare", required:true, durationMin:1, icon:"📤", isFinal:true, nextStage:"df_signing_bank"},
+  ],
+
+  df_signing_bank: [
+    {id:"review_df",         label:"Проверить ДФ перед подписью",            role:"signer", required:true, durationMin:3,  icon:"👁"},
+    {id:"review_act",        label:"Проверить акт сверки",                   role:"signer", required:true, durationMin:2,  icon:"👁"},
+    {id:"sign_both_ecp",     label:"Подписать оба документа ЭЦП (PIN)",      role:"signer", required:true, durationMin:1,  icon:"🔏", isFinal:true, nextStage:"df_signing_creditor"},
+  ],
+
+  // ─── Phase 3 — клиентские этапы (банк только мониторит) ───
+  df_signing_creditor: [
+    {id:"send_reminder_creditor", label:"Напомнить кредитору (email/SMS)",   role:"usko_prepare", required:false, durationMin:1, icon:"📧"},
+    {id:"creditor_signed",   label:"Кредитор подписал ДФ + акт",             role:"supplier", required:true, durationMin:0, icon:"✓", isFinal:true, nextStage:"debtor_signing", isClientAction:true},
+  ],
+
+  debtor_signing: [
+    {id:"send_reminder_debtor", label:"Напомнить должнику (email/SMS)",      role:"usko_prepare", required:false, durationMin:1, icon:"📧"},
+    {id:"debtor_signed",     label:"Должник подписал акт + уведомление",     role:"debtor",   required:true, durationMin:0, icon:"✓", isFinal:true, nextStage:"payment_authorization", isClientAction:true},
+  ],
+
+  // ─── Phase 4 ───
+  payment_authorization: [
+    {id:"verify_recipient",  label:"Проверить реквизиты получателя",         role:"usko_prepare", required:true, durationMin:2, icon:"🔍"},
+    {id:"verify_amount",     label:"Проверить сумму к выплате",              role:"usko_prepare", required:true, durationMin:1, icon:"💵"},
+    {id:"send_to_abs",       label:"Отправить распоряжение в АБС",           role:"usko_prepare", required:true, durationMin:1, icon:"📤", isFinal:true, nextStage:"payment_disbursed"},
+  ],
+
+  payment_disbursed: [
+    {id:"check_abs_disbursed", label:"Проверить выдачу в АБС",               role:"usko_prepare", required:true, durationMin:5,  icon:"🏦"},
+    {id:"confirm_disbursement", label:"Подтвердить «финансирование выдано»", role:"usko_prepare", required:true, durationMin:1,  icon:"✅", isFinal:true, nextStage:"awaiting_debtor_payment"},
+  ],
+
+  // ─── Phase 5 ───
+  awaiting_debtor_payment: [
+    {id:"monitor_debtor",    label:"Мониторинг платежа от должника",         role:"credit_ops", required:false, durationMin:1, icon:"👀"},
+    {id:"send_reminder_due", label:"Напомнить должнику о сроке",             role:"credit_ops", required:false, durationMin:1, icon:"📧"},
+    {id:"confirm_payment",   label:"Должник оплатил (подтвердить вручную)",  role:"credit_ops", required:true, durationMin:1, icon:"✓", isFinal:true, nextStage:"assignment_closed"},
+  ],
+
+  debtor_overdue: [
+    {id:"send_claim_1",      label:"Отправить претензию #1",                 role:"credit_ops", required:false, durationMin:5, icon:"⚠"},
+    {id:"send_claim_2",      label:"Отправить претензию #2",                 role:"credit_ops", required:false, durationMin:5, icon:"⚠"},
+    {id:"send_final_claim",  label:"Финальная претензия с уведомлением",     role:"credit_ops", required:false, durationMin:5, icon:"⚠"},
+    {id:"escalate_to_legal", label:"Эскалировать в юр.отдел",                role:"credit_ops", required:true,  durationMin:2, icon:"⚖", isFinal:true, nextStage:"debtor_defaulted"},
+  ],
+
+  debtor_defaulted: [
+    {id:"prepare_court_docs", label:"Подготовить пакет документов для суда", role:"legal", required:true, durationMin:60, icon:"📑"},
+    {id:"file_court_case",   label:"Подать исковое заявление",               role:"legal", required:true, durationMin:30, icon:"⚖"},
+    {id:"recover_through_court", label:"Средства взысканы через суд",       role:"legal", required:true, durationMin:0,  icon:"💰", isFinal:true, nextStage:"assignment_closed"},
+  ],
+};
+
+// ─── Helper: получить задачи для уступки ───
+function getAssignmentTasks(asg) {
+  if (!asg) return [];
+  return ASSIGNMENT_TASKS[asg.stage] || [];
+}
+
+// ─── Helper: проверить выполнена ли задача ───
+function isTaskCompleted(asg, taskId) {
+  return !!(asg.completedTasks && asg.completedTasks[taskId]);
+}
+
+// ─── Helper: вычислить smart routing для usko_review ───
+function resolveNextStage(asg, task) {
+  if (task.nextStage === "_smart_route_by_amount") {
+    return (asg.amount || 0) > 50000 ? "lpr_decision_assignment" : "abs_card_creation";
+  }
+  return task.nextStage;
+}
+
+// ─── 5 логических фаз для UI (новая структура: добавлена verify_debtor) ───
 const ASSIGNMENT_PHASES = [
-  {id:"docs", label:"Документы", icon:"📄",
-    description:"Загрузка комплекта и подтверждение должником",
-    actorsInvolved:"👤 Поставщик + 🚚 Должник",
-    bankAction:"Банк ожидает (не действует)"},
-  {id:"check", label:"Проверка", icon:"🔍",
-    description:"УСКО проверяет комплект документов",
-    actorsInvolved:"🏦 УСКО-специалист",
-    bankAction:"Проверить ДКП/ТТН/ЭСЧФ → принять или вернуть"},
-  {id:"sign", label:"Подписание ДС", icon:"✍️",
-    description:"Банк формирует ДС и обе стороны подписывают",
-    actorsInvolved:"🏦 УСКО + 🏦 Подписант + 👤 Клиент",
-    bankAction:"Сформировать ДС → подписать ЭЦП → ждать клиента"},
-  {id:"pay", label:"Оплата клиенту", icon:"💰",
-    description:"УСКО разрешает оплату, АБС перечисляет клиенту",
-    actorsInvolved:"🏦 УСКО-специалист",
-    bankAction:"Проверить реквизиты → разрешить оплату в АБС"},
+  {id:"verify_debtor", label:"Верификация должника", icon:"🔍",
+    description:"Кредитор приглашает должника, тот проходит идентификацию и скоринг",
+    actorsInvolved:"👤 Кредитор + 🚚 Должник + 🏦 Аналитик",
+    bankAction:"Аналитик: проверить скоринг должника → установить лимит (объём)"},
+  {id:"create", label:"Создание уступки", icon:"📄",
+    description:"Кредитор создаёт уступку с реестром ТТН за день, УСКО проверяет",
+    actorsInvolved:"👤 Кредитор + 🏦 УСКО + 🏦 ЛПР",
+    bankAction:"УСКО: проверить документы → сверить с лимитом → передать ЛПР (если >50К)"},
+  {id:"abs", label:"АБС + Договор факторинга", icon:"🏦",
+    description:"УСКО заполняет карточки в АБС, формирует ДФ на 1 страничку, банк подписывает",
+    actorsInvolved:"🏦 УСКО + 🏦 Подписант",
+    bankAction:"Заполнить АБС → сформировать ДФ + акт сверки → подписать ЭЦП банка"},
+  {id:"sign", label:"Подписание клиентами", icon:"✍️",
+    description:"Кредитор подписывает (ДФ + акт), должник подписывает (акт + уведомление)",
+    actorsInvolved:"👤 Кредитор + 🚚 Должник",
+    bankAction:"Банк ждёт подписей. УСКО мониторит, может напомнить."},
+  {id:"pay", label:"Финансирование", icon:"💰",
+    description:"УСКО оформляет распоряжение, выдаёт финансирование в АБС, подтверждает на платформе",
+    actorsInvolved:"🏦 УСКО",
+    bankAction:"Оформить распоряжение → выдать в АБС → нажать «финансирование выдано»"},
   {id:"recover", label:"Возврат от должника", icon:"🔄",
-    description:"Ожидание платежа от должника, взыскание при просрочке",
+    description:"Ожидание платежа от должника (60д), взыскание при просрочке",
     actorsInvolved:"🚚 Должник → 🏦 Кредитный менеджер → 🏦 Юр.отдел",
     bankAction:"Мониторить платёж → при просрочке: напомнить/претензия/суд"},
 ];
@@ -3607,22 +4458,208 @@ function getAssignmentPhase(stage) {
 }
 
 const ASSIGNMENT_SLA_LIMITS = {
-  docs_received: {days:0, actor:"platform"},
-  debtor_notified: {days:0, actor:"platform"},
-  debtor_confirming: {days:3, actor:"debtor"},
-  usko_checking: {days:2, actor:"bank"},
-  returned_to_supplier: {days:5, actor:"supplier"},
-  ds_preparing: {days:1, actor:"bank"},
-  ds_signing_bank: {days:1, actor:"bank"},
-  ds_signing_client: {days:3, actor:"supplier"},
-  payment_approved: {days:1, actor:"bank"},
-  // Recover phase SLA
-  awaiting_debtor: {days:60, actor:"debtor"}, // typical factoring term 30-90 days; avg 60
-  debtor_overdue: {days:14, actor:"bank"},    // credit_ops has 14 days to resolve before default
-  debtor_defaulted: {days:90, actor:"bank"},  // legal has 90 days for court proceedings
+  // Phase 0: верификация должника
+  debtor_invitation_sent: {days:7, actor:"debtor"},     // должник имеет 7 дней пройти регистрацию
+  debtor_identification: {days:2, actor:"debtor"},      // 2 дня на идентификацию (МСИ, документы)
+  debtor_scoring: {days:1, actor:"bank"},               // аналитик: 1 день на скоринг должника
+  debtor_verified: {days:0, actor:"system"},            // мгновенно
+
+  // Phase 1: создание уступки
+  assignment_created: {days:0, actor:"platform"},       // мгновенно — кредитор создал
+  usko_review: {days:1, actor:"bank"},                  // УСКО: 1 день на проверку
+  lpr_decision_assignment: {days:1, actor:"bank"},      // ЛПР: 1 день
+  returned_to_creditor: {days:5, actor:"supplier"},     // кредитор: 5 дней на исправление
+
+  // Phase 2: АБС + ДФ
+  abs_card_creation: {days:1, actor:"bank"},            // УСКО: 1 день в АБС
+  df_generation: {days:0, actor:"platform"},            // мгновенно — генерация платформой
+  df_signing_bank: {days:1, actor:"bank"},              // подписант: 1 день
+
+  // Phase 3: подписание клиентами
+  df_signing_creditor: {days:2, actor:"supplier"},      // кредитор: 2 дня
+  debtor_signing: {days:3, actor:"debtor"},             // должник: 3 дня
+
+  // Phase 4: финансирование
+  payment_authorization: {days:1, actor:"bank"},        // УСКО: 1 день на распоряжение
+  payment_disbursed: {days:0, actor:"system"},          // мгновенно после нажатия кнопки
+
+  // Phase 5: возврат
+  awaiting_debtor_payment: {days:60, actor:"debtor"},   // стандартный срок факторинга — 60 дней
+  debtor_overdue: {days:14, actor:"bank"},              // 14 дней credit_ops до дефолта
+  debtor_defaulted: {days:90, actor:"bank"},            // 90 дней на судебное взыскание
+  assignment_closed: {days:0, actor:"system"},          // финальный
 };
 
 const CLIENT_ACTIVITY_THRESHOLDS = {normal:1, warning:3, urgent:7};
+
+// ═══════════════════════════════════════════════════════════
+// HELPERS — для новой модели данных (Сессия 2)
+// ═══════════════════════════════════════════════════════════
+
+// ─── Лимит должника ───
+// Получить активный лимит должника. Если company имеет limitAsDebtor — используем его.
+// Иначе fallback на старые поля limit/used/available.
+function getDebtorLimit(company) {
+  if (!company) return null;
+  if (company.limitAsDebtor) {
+    return {
+      total: company.limitAsDebtor.total || 0,
+      used: company.limitAsDebtor.used || 0,
+      available: company.limitAsDebtor.available || 0,
+      approvedDate: company.limitAsDebtor.approvedDate,
+      approvedBy: company.limitAsDebtor.approvedBy,
+      decisionId: company.limitAsDebtor.decisionId,
+      isRejected: !!company.limitAsDebtor.rejectedDate,
+      rejectReason: company.limitAsDebtor.rejectReason,
+      history: company.limitAsDebtor.history || [],
+    };
+  }
+  // Fallback: старая модель (compatibility)
+  return {
+    total: company.limit || 0,
+    used: company.used || 0,
+    available: company.available || 0,
+    approvedDate: company.regDate,
+    approvedBy: "—",
+    decisionId: null,
+    isRejected: company.status === "rejected",
+    rejectReason: null,
+    history: [],
+  };
+}
+
+// Может ли компания принимать новую уступку на сумму X?
+function canDebtorAcceptAssignment(company, amount) {
+  const limit = getDebtorLimit(company);
+  if (!limit) return {ok: false, reason: "Должник не найден"};
+  if (limit.isRejected) return {ok: false, reason: "Лимит отклонён: " + (limit.rejectReason || "по решению банка")};
+  if (limit.total === 0) return {ok: false, reason: "Лимит не установлен"};
+  if (amount > limit.available) return {ok: false, reason: `Превышение лимита: запрошено ${amount}, доступно ${limit.available}`};
+  return {ok: true, available: limit.available, total: limit.total};
+}
+
+// Получить активные уступки на конкретного должника (через ASSIGNMENTS глобально)
+function getDebtorActiveAssignments(debtorId, allAssignments) {
+  return (allAssignments || []).filter(a =>
+    a.debtorId === debtorId &&
+    !["assignment_closed", "debtor_defaulted"].includes(a.stage)
+  );
+}
+
+// ─── Роли компании на платформе ───
+function isCompanyCreditor(company) {
+  if (company?.rolesOnPlatform?.includes("creditor")) return true;
+  return company?.role === "creditor"; // fallback
+}
+function isCompanyDebtor(company) {
+  if (company?.rolesOnPlatform?.includes("debtor")) return true;
+  return company?.role === "debtor"; // fallback
+}
+
+// ─── Новая модель уступки (lazy: рассчитать из существующих полей) ───
+// Получить унифицированный объект-сводку уступки в новом формате.
+// Поддерживает старые ASG моки (с dsNumber) и новые (с dfNumber).
+function getAssignmentSummary(asg) {
+  if (!asg) return null;
+  // dfNumber — приоритет; если нет, генерируем из dsNumber/id
+  const dfNumber = asg.dfNumber || asg.dsNumber ||
+    `ДФ-${asg.createdDate || "—"}-${asg.id?.replace("ASG-", "") || "001"}`;
+  const dfDate = asg.dfDate || asg.dsDate || asg.createdDate;
+  // ttnRegistry — если нет, делаем из единственной ТТН
+  const ttnRegistry = asg.ttnRegistry || (asg.ttnNumber ? [{
+    ttnNumber: asg.ttnNumber,
+    amount: asg.amount,
+    shipDate: asg.shippingDate || asg.createdDate,
+  }] : []);
+  return {
+    id: asg.id,
+    dfNumber, dfDate,
+    ttnRegistry,
+    totalAmount: asg.amount,
+    rate: asg.rate || 25,
+    termDays: asg.termDays || 60,
+    discount: asg.discount,
+    toReceive: asg.toReceive,
+    creditorId: asg.creditorId,
+    debtorId: asg.debtorId,
+    stage: asg.stage,
+  };
+}
+
+// ─── Подписи (новая модель signatures) ───
+function getAssignmentSignatures(asg) {
+  if (!asg) return null;
+  // Если есть новая структура signatures — возвращаем её
+  if (asg.signatures) return asg.signatures;
+  // Иначе синтезируем из старых полей (backward-compat)
+  return {
+    bank: {
+      signed: !!asg.signedByBank,
+      signedBy: asg.signedByBank || null,
+      signedAt: asg.signedByBankDate || null,
+      certNumber: null,
+    },
+    creditor_df: {
+      signed: !!asg.signedByClientDate,
+      signedAt: asg.signedByClientDate || null,
+    },
+    creditor_act: {
+      signed: !!asg.signedByClientDate,
+      signedAt: asg.signedByClientDate || null,
+    },
+    debtor_act: {
+      signed: asg.docs?.actReconciliation?.status === "signed",
+      signedAt: asg.docs?.actReconciliation?.date || null,
+    },
+    debtor_notification: {
+      signed: asg.docs?.notification?.status === "sent",
+      signedAt: asg.docs?.notification?.date || null,
+    },
+  };
+}
+
+// ─── Финансирование (новая модель financing) ───
+function getAssignmentFinancing(asg) {
+  if (!asg) return null;
+  if (asg.financing) return asg.financing;
+  // Backward-compat
+  return {
+    accountNumber: asg.accountNumber || null,
+    disbursedDate: asg.paidDate || null,
+    disbursedBy: asg.paymentApprovedBy || null,
+    authorizationDate: asg.paymentApprovedDate || null,
+  };
+}
+
+// ─── Repayment matching (Сессия 8) ───
+// Попытка автоматического сопоставления платежа из АБС с активной уступкой
+// Стратегия: УНП должника + сумма + (опционально) № ДФ из назначения платежа
+function matchRepaymentToAssignment(payment, allAssignments, allCompanies) {
+  const debtor = (allCompanies || []).find(c => c.unp === payment.payerUnp);
+  if (!debtor) return {match: null, confidence: 0, reason: "Должник не найден на платформе"};
+
+  // Кандидаты — активные уступки этого должника
+  const candidates = (allAssignments || []).filter(a =>
+    a.debtorId === debtor.id &&
+    ["awaiting_debtor_payment", "debtor_overdue", "payment_disbursed"].includes(a.stage)
+  );
+  if (candidates.length === 0) return {match: null, confidence: 0, reason: "У должника нет активных уступок"};
+
+  // Поиск точного совпадения по сумме + ДФ
+  const exactMatch = candidates.find(a => {
+    const summary = getAssignmentSummary(a);
+    const refIncludesDf = payment.paymentReference && summary.dfNumber && payment.paymentReference.includes(summary.dfNumber);
+    return a.amount === payment.amount && refIncludesDf;
+  });
+  if (exactMatch) return {match: exactMatch, confidence: 100, reason: "Совпадение по УНП + сумма + № ДФ"};
+
+  // Совпадение только по сумме (если 1 кандидат)
+  const amountMatch = candidates.filter(a => a.amount === payment.amount);
+  if (amountMatch.length === 1) return {match: amountMatch[0], confidence: 80, reason: "Совпадение по УНП + сумма (без № ДФ)"};
+  if (amountMatch.length > 1) return {match: null, confidence: 50, reason: `Найдено ${amountMatch.length} уступок с такой суммой — нужна ручная проверка`};
+
+  return {match: null, confidence: 30, reason: "Сумма не совпадает с активными уступками должника"};
+}
 
 function getAssignmentDaysOnStage(asg) {
   const start = asg.stageStartDate || asg.createdDate;
@@ -3643,9 +4680,9 @@ function isAssignmentClientOverdue(asg) {
   const info = getAssignmentSlaInfo(asg);
   return info.overdue && (info.actor === "supplier" || info.actor === "debtor");
 }
-// isAssignmentDebtorPaymentOverdue — должник не оплатил в срок после получения уведомления
+// isAssignmentDebtorPaymentOverdue — должник не оплатил в срок после получения финансирования
 function isAssignmentDebtorPaymentOverdue(asg) {
-  if (asg.stage !== "paid") return false; // only applies to paid assignments awaiting debtor repayment
+  if (asg.stage !== "payment_disbursed" && asg.stage !== "awaiting_debtor_payment") return false;
   if (!asg.dueDate) return false;
   try {
     const due = new Date(asg.dueDate);
@@ -3655,18 +4692,17 @@ function isAssignmentDebtorPaymentOverdue(asg) {
 }
 
 // ─── Assignment lifecycle helpers for recover phase ───
-// isAssignmentPaidToClient — deal выплачен клиенту (прошёл фазу pay)
-// Note: после paid уступка живёт в фазе recover
+// isAssignmentPaidToClient — финансирование выдано клиенту (прошёл фазу pay)
 function isAssignmentPaidToClient(asg) {
-  return ["paid", "awaiting_debtor", "debtor_overdue", "debtor_defaulted", "debtor_paid"].includes(asg.stage);
+  return ["payment_disbursed", "awaiting_debtor_payment", "debtor_overdue", "debtor_defaulted", "assignment_closed"].includes(asg.stage);
 }
 // isAssignmentFullyClosed — полностью закрыто (должник погасил)
 function isAssignmentFullyClosed(asg) {
-  return asg.stage === "debtor_paid";
+  return asg.stage === "assignment_closed";
 }
 // isAssignmentActiveForBank — ещё в работе банка (до полного закрытия)
 function isAssignmentActiveForBank(asg) {
-  return asg.stage !== "debtor_paid";
+  return asg.stage !== "assignment_closed";
 }
 function isAssignmentWaitingClient(asg) {
   const info = getAssignmentSlaInfo(asg);
@@ -4400,6 +5436,123 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
   return <div>
     <PageHeader title="Мои задачи" breadcrumbs={["Мои задачи"]}/>
 
+    {/* ═══ HERO-задача — самая срочная, для быстрого старта дня ═══ */}
+    {(() => {
+      if (allMyTasks.length === 0) return null;
+      // Применяем skippedHeroIds — пропущенные не показываем как hero
+      const eligible = allMyTasks.filter(t => !skippedHeroIds.includes(t.id));
+      if (eligible.length === 0) {
+        // Все пропущены — показываем reset-карточку
+        return <Card className="p-4 mb-5 text-center" style={{background: "#F8FAFC"}}>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            Все задачи в очереди скрыты. <button onClick={() => setSkippedHeroIds([])} className="underline font-bold" style={{color: B.accent}}>Показать снова</button>
+          </div>
+        </Card>;
+      }
+      // Сортировка: 1) overdue first, 2) urgent_sign, 3) с большой суммой, 4) с большим days
+      const sorted = [...eligible].sort((a, b) => {
+        if (a.overdue && !b.overdue) return -1;
+        if (!a.overdue && b.overdue) return 1;
+        if (a.category === "urgent_sign" && b.category !== "urgent_sign") return -1;
+        if (b.category === "urgent_sign" && a.category !== "urgent_sign") return 1;
+        return ((b.amount || 0) - (a.amount || 0));
+      });
+      const hero = sorted[0];
+      if (!hero) return null;
+
+      const heroIcon = hero.type === "assignment" ? "📦" : hero.type === "pipeline" ? "⚡" : hero.type === "document" ? "📄" : "📋";
+      const heroAccent = hero.overdue ? B.red : hero.color;
+
+      return <Card className="p-5 mb-5 relative overflow-hidden" style={{
+        background: "linear-gradient(135deg, white 0%, " + heroAccent + "08 100%)",
+        borderColor: heroAccent + "60",
+        borderWidth: 2,
+      }}>
+        {/* Decorative corner */}
+        <div className="absolute top-0 right-0 w-32 h-32 opacity-10 rounded-bl-full" style={{background: heroAccent}}/>
+
+        <div className="flex items-start justify-between gap-4 relative">
+          <div className="flex items-start gap-3 min-w-0 flex-1">
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-2xl" style={{background: heroAccent + "15", border: `1px solid ${heroAccent}30`}}>
+              {heroIcon}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: heroAccent}}>
+                  {hero.overdue ? "🔥 Срочно — просрочено SLA" : "👉 Ваша главная задача"}
+                </span>
+                {hero.overdue && <span className="text-[9px] px-2 py-0.5 rounded-full font-bold animate-pulse" style={{background: B.red, color: "white"}}>
+                  ⚠ {hero.days - hero.limit}д просрочки
+                </span>}
+              </div>
+              <div className="text-base font-black" style={{color: B.t1}}>
+                {hero.action ? hero.action[0].toUpperCase() + hero.action.slice(1) : hero.subtitle}
+                {hero.amount && <span style={{color: heroAccent}}> · {fmtByn(hero.amount)}</span>}
+              </div>
+              <div className="text-[11px] mt-1" style={{color: B.t2}}>
+                <span className="font-mono font-bold">{hero.id}</span>
+                <span className="mx-1.5">·</span>
+                <span>{hero.title}</span>
+                {hero.subtitle && hero.subtitle !== (ASSIGNMENT_STAGES.find(s => s.id === hero.raw?.stage)?.label) && <>
+                  <span className="mx-1.5">·</span>
+                  <span>{hero.subtitle}</span>
+                </>}
+              </div>
+              <div className="flex items-center gap-3 mt-2 text-[10px]" style={{color: B.t3}}>
+                {hero.days != null && <span>📅 {hero.days} {hero.days === 1 ? "день" : "дней"} на этапе</span>}
+                {hero.limit != null && hero.limit > 0 && <span>⏱ SLA {hero.limit}д</span>}
+                {hero.priority === "high" && <span style={{color: B.red}}>🔥 Высокий приоритет</span>}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <Btn size="lg" variant="primary" icon={ArrowRight}
+              onClick={() => navigateToTask(hero)}
+              style={{background: heroAccent}}>
+              Открыть и выполнить
+            </Btn>
+            {allMyTasks.length > 1 && <button
+              onClick={() => setSkippedHeroIds(prev => [...prev, hero.id])}
+              className="text-[10px] hover:underline" style={{color: B.t3}}>
+              Пропустить, показать другую →
+            </button>}
+          </div>
+        </div>
+
+        {/* Mini-summary: остальные задачи */}
+        {allMyTasks.length > 1 && <div className="mt-4 pt-3 border-t flex items-center justify-between text-[10px]" style={{borderColor: B.border, color: B.t3}}>
+          <span>
+            После этой задачи у вас ещё <strong style={{color: B.t1}}>{allMyTasks.length - 1}</strong> {allMyTasks.length - 1 === 1 ? "задача" : (allMyTasks.length - 1 >= 2 && allMyTasks.length - 1 <= 4) ? "задачи" : "задач"}
+          </span>
+          <span>
+            🔥 {allMyTasks.filter(t => t.overdue).length} просрочек
+            <span className="mx-2">·</span>
+            ⏱ ~{allMyTasks.reduce((sum, t) => sum + (t.limit || 0), 0)} мин на всё
+          </span>
+        </div>}
+      </Card>;
+    })()}
+
+    {/* ═══ Empty state — все задачи выполнены ═══ */}
+    {allMyTasks.length === 0 && <Card className="p-12 mb-5 text-center" style={{background: "linear-gradient(135deg, white 0%, " + B.greenL + " 100%)", borderColor: B.green + "30"}}>
+      <div className="text-6xl mb-3">✨</div>
+      <div className="text-lg font-black mb-1" style={{color: B.green}}>Все задачи выполнены!</div>
+      <div className="text-xs mb-4" style={{color: B.t2}}>
+        У вас сейчас нет задач, требующих действия. Можно посмотреть воронку или подождать новых заявок.
+      </div>
+      <div className="flex items-center justify-center gap-2">
+        <Btn size="sm" variant="primary" icon={GitBranch}
+          onClick={() => onSwitchToAll && onSwitchToAll()}>
+          Открыть воронку
+        </Btn>
+        <Btn size="sm" variant="ghost" icon={Package}
+          onClick={() => {if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("oborotka:nav", {detail: {page: "assignments"}}));}}>
+          Все уступки
+        </Btn>
+      </div>
+    </Card>}
+
     {/* Overload warning — when tasks count indicates overload */}
     {allMyTasks.length >= 15 && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow + "40"}}>
       <div className="flex items-center gap-3">
@@ -4536,10 +5689,105 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
       currentUser={currentUser}
     />}
 
-    {/* UNIFIED TABLE — все остальные задачи (не приоритетные) из всех модулей */}
+    {/* ═══ Сегментация задач уступок по фазам (новый блок) ═══ */}
+    {(() => {
+      const asgTasks = allMyTasks.filter(t => t.type === "assignment" && !["urgent"].includes(t.category));
+      if (asgTasks.length === 0) return null;
+
+      // Группируем по фазам
+      const byPhase = {};
+      ASSIGNMENT_PHASES.forEach(p => byPhase[p.id] = []);
+      asgTasks.forEach(t => {
+        const stage = ASSIGNMENT_STAGES.find(s => s.id === t.raw?.stage);
+        const phaseId = stage?.phase || "other";
+        if (!byPhase[phaseId]) byPhase[phaseId] = [];
+        byPhase[phaseId].push(t);
+      });
+
+      const nonEmptyPhases = ASSIGNMENT_PHASES.filter(p => byPhase[p.id]?.length > 0);
+      if (nonEmptyPhases.length === 0) return null;
+
+      return <div className="mb-5">
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-base font-black" style={{color: B.t1}}>Задачи по уступкам — сегментация по фазам</h2>
+          <span className="text-[11px] px-2 py-0.5 rounded-full font-bold" style={{background: B.accentL, color: B.accent}}>
+            {asgTasks.length}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          {nonEmptyPhases.map(phase => {
+            const phaseTasks = byPhase[phase.id];
+            return <Card key={phase.id} className="p-4">
+              <div className="flex items-center justify-between mb-3 pb-2 border-b" style={{borderColor: B.border}}>
+                <div className="flex items-center gap-2">
+                  <span className="text-base">{phase.icon}</span>
+                  <div>
+                    <div className="text-xs font-bold" style={{color: B.t1}}>{phase.label}</div>
+                    <div className="text-[9px]" style={{color: B.t3}}>{phase.actorsInvolved}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold" style={{background: B.accentL, color: B.accent}}>
+                  {phaseTasks.length}
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                {phaseTasks.slice(0, 5).map(t => {
+                  const stageInfo = ASSIGNMENT_STAGES.find(s => s.id === t.raw?.stage);
+                  // Показываем сколько задач внутри этого этапа выполнено
+                  const stageTasks = ASSIGNMENT_TASKS[t.raw?.stage] || [];
+                  const completed = stageTasks.filter(st => t.raw?.completedTasks?.[st.id]).length;
+                  const totalReq = stageTasks.filter(st => st.required).length;
+
+                  return <button key={t.id} onClick={() => navigateToTask(t)}
+                    className="w-full text-left p-2.5 rounded-lg hover:shadow-sm transition-all"
+                    style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10px] mono font-bold" style={{color: B.t1}}>{t.id}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold" style={{background: stageInfo?.color + "15", color: stageInfo?.color}}>
+                          {stageInfo?.label || t.raw?.stage}
+                        </span>
+                        {t.overdue && <span className="text-[9px] px-1 py-0.5 rounded font-bold" style={{background: B.red, color: "white"}}>⚠ SLA</span>}
+                      </div>
+                      <span className="text-[10px] mono font-bold shrink-0" style={{color: B.t1}}>
+                        {fmtByn(t.amount || 0)}
+                      </span>
+                    </div>
+                    <div className="text-[10px] flex items-center justify-between" style={{color: B.t2}}>
+                      <span>👉 {t.action}</span>
+                      {totalReq > 0 && <span className="font-mono" style={{color: completed === totalReq ? B.green : B.t3}}>
+                        {completed}/{totalReq} задач
+                      </span>}
+                    </div>
+                    {/* Mini progress bar */}
+                    {totalReq > 0 && <div className="h-1 rounded-full overflow-hidden mt-1.5" style={{background: "#E2E8F0"}}>
+                      <div className="h-full transition-all" style={{
+                        width: `${(completed / totalReq) * 100}%`,
+                        background: completed === totalReq ? B.green : (stageInfo?.color || B.accent),
+                      }}/>
+                    </div>}
+                  </button>;
+                })}
+                {phaseTasks.length > 5 && <div className="text-[10px] text-center pt-1" style={{color: B.t3}}>
+                  ...и ещё {phaseTasks.length - 5}
+                </div>}
+              </div>
+            </Card>;
+          })}
+        </div>
+      </div>;
+    })()}
+
+    {/* UNIFIED TABLE — все остальные задачи (не приоритетные, не assignment) из всех модулей */}
     {!batchMode && allMyTasks.length > 0 && (() => {
       // All non-priority tasks across all modules (pipeline + assignment + document)
-      const tableTasks = allMyTasks.filter(t => !["urgent", "urgent_sign", "expiring"].includes(t.category));
+      // Все остальные задачи (не приоритетные, не уступки — их показываем в фазовой сегментации выше)
+      const tableTasks = allMyTasks.filter(t =>
+        !["urgent", "urgent_sign", "expiring"].includes(t.category) &&
+        t.type !== "assignment"
+      );
       if (tableTasks.length === 0) return null;
       return <div className="mb-5">
         <div className="flex items-center gap-2 mb-3">
@@ -4645,6 +5893,52 @@ function MyQueueView({currentUser, myData, tierFilter, setTierFilter, search, se
     {filtered.length > 0 && !batchMode && <div className="fixed bottom-4 right-4 text-[10px] px-2 py-1 rounded z-40"
       style={{background: "rgba(15,23,42,0.85)", color: "white"}}>
       Нажмите <kbd className="px-1 bg-white/20 rounded mono">?</kbd> — хоткеи
+    </div>}
+
+    {/* ─── Sticky progress footer — сколько задач осталось в очереди ─── */}
+    {allMyTasks.length > 0 && <div className="fixed bottom-0 left-0 right-0 z-30 px-4 py-2.5"
+      style={{
+        background: "rgba(255,255,255,0.95)",
+        backdropFilter: "blur(8px)",
+        borderTop: `1px solid ${B.border}`,
+        boxShadow: "0 -2px 8px rgba(0,0,0,0.04)",
+      }}>
+      <div className="max-w-screen-xl mx-auto flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 text-[11px]">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full" style={{background: B.accent}}/>
+            <span style={{color: B.t2}}>Активных задач:</span>
+            <strong style={{color: B.t1}}>{allMyTasks.length}</strong>
+          </div>
+          {allMyTasks.filter(t => t.overdue).length > 0 && <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full animate-pulse" style={{background: B.red}}/>
+            <span style={{color: B.t2}}>Просрочек:</span>
+            <strong style={{color: B.red}}>{allMyTasks.filter(t => t.overdue).length}</strong>
+          </div>}
+          {(() => {
+            const totalMinutes = allMyTasks.reduce((sum, t) => {
+              if (t.type === "assignment" && t.raw?.stage) {
+                const stageTasks = ASSIGNMENT_TASKS[t.raw.stage] || [];
+                return sum + stageTasks.filter(st => st.required).reduce((s, st) => s + (st.durationMin || 0), 0);
+              }
+              return sum + 5; // ~5 мин на не-assignment задачу
+            }, 0);
+            if (totalMinutes < 1) return null;
+            const hours = Math.floor(totalMinutes / 60);
+            const mins = totalMinutes % 60;
+            return <div className="flex items-center gap-1.5" style={{color: B.t3}}>
+              <span>⏱ ~{hours > 0 ? hours + "ч " : ""}{mins}м на всё</span>
+            </div>;
+          })()}
+        </div>
+        <div className="flex items-center gap-2">
+          {allMyTasks.length > 1 && <button
+            onClick={() => onSwitchToAll && onSwitchToAll()}
+            className="text-[10px] px-2 py-1 rounded hover:bg-slate-100" style={{color: B.t3}}>
+            Воронка ↗
+          </button>}
+        </div>
+      </div>
     </div>}
   </div>;
 }
@@ -5411,7 +6705,8 @@ function AllPipelineView({currentUser, pipelineData, stageFilter, setStageFilter
   };
 
   return <div>
-    <PageHeader title="Кредитный конвейер" breadcrumbs={["Кредитный конвейер"]}
+    <PageHeader title="Скоринг клиентов" breadcrumbs={["Скоринг клиентов"]}
+      subtitle="Подтверждение скоринга и активация клиента (создание уступок)"
       actions={<div className="flex items-center gap-2">
         <ExportButton filename="konveyer" setToast={setToast}
           columns={[
@@ -5981,8 +7276,8 @@ function InformationalBanner({req, currentUser}) {
   if (req.stage === "active") {
     const canRequestLimit = ROLE_ACCESS[currentUser.role]?.canRequestLimitReview;
     const dealAssignments = ASSIGNMENTS.filter(a => a.dealId === req.id);
-    const usedAmount = dealAssignments.filter(a => a.stage === "paid").reduce((s,a) => s+a.amount, 0);
-    const activeAssignments = dealAssignments.filter(a => a.stage !== "paid").length;
+    const usedAmount = dealAssignments.filter(a => a.stage === "payment_disbursed").reduce((s,a) => s+a.amount, 0);
+    const activeAssignments = dealAssignments.filter(a => a.stage !== "payment_disbursed").length;
     const limit = req.approvedLimit || 0;
     const usagePct = limit > 0 ? Math.round(usedAmount/limit*100) : 0;
     return <Card className="p-5 mb-5" style={{background:B.greenL, borderColor:B.green+"40"}}>
@@ -6557,11 +7852,11 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
           }, `Верифицировано. Передано ЛПР на решение`),
         };
       } else {
-        // ≤50K → analyst signs immediately
+        // ≤50K → analyst signs immediately, → УСКО активирует клиента
         primaryAction = {
           label: signing ? "Подпись..." : "✓ Одобрить и подписать ЭЦП",
           icon: signing ? Loader2 : CheckCircle,
-          onClick: () => doAdvance("contract_preparation", {
+          onClick: () => doAdvance("client_activation", {
             approvedLimit: parseInt(limitInput, 10) || 0,
             approvedRate: parseFloat(rateSelect),
             approvedTerm: parseInt(termSelect, 10),
@@ -6569,7 +7864,7 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
             analystComment: comment,
             decisionBy: currentUser.name,
             decisionDate: "2026-03-26",
-          }, `Одобрено. Передано в УСКО на оформление договора`),
+          }, `Одобрено. Передано в УСКО на активацию клиента`),
         };
       }
     }
@@ -6579,7 +7874,7 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
       primaryAction = {
         label: signing ? "Подпись..." : "✓ Одобрить и подписать ЭЦП",
         icon: signing ? Loader2 : CheckCircle,
-        onClick: () => doAdvance("contract_preparation", {
+        onClick: () => doAdvance("client_activation", {
           approvedLimit: parseInt(limitInput, 10) || 0,
           approvedRate: parseFloat(rateSelect),
           approvedTerm: parseInt(termSelect, 10),
@@ -6587,65 +7882,14 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
           lprComment: comment,
           decisionBy: currentUser.name,
           decisionDate: "2026-03-26",
-        }, `ЛПР одобрил. Передано в УСКО на оформление договора`),
+        }, `ЛПР одобрил. Передано в УСКО на активацию клиента`),
       };
     }
   } else if (req.stage === "client_activation") {
     primaryAction = {
       label: signing ? "Активация..." : "⚡ АКТИВИРОВАТЬ КЛИЕНТА",
       icon: signing ? Loader2 : CheckCircle,
-      onClick: () => doAdvance("active", {}, `🎉 Поздравляем! Клиент ${req.company} активирован и может создавать уступки`),
-    };
-  } else if (req.stage === "contract_preparation") {
-    // Contract preparation — runs generation animation + creates contract
-    const runGeneration = () => {
-      setGenerating(true);
-      setGenerationStep(1);
-      // Step 1: Fetch data from ABS (0.5s)
-      setTimeout(() => {
-        setGenerationStep(2);
-        // Step 2: Fill template (0.7s)
-        setTimeout(() => {
-          setGenerationStep(3);
-          // Step 3: Generate PDF (0.8s)
-          setTimeout(() => {
-            setGenerationStep(4);
-            // Step 4: Assign contract number (0.3s)
-            setTimeout(() => {
-              const newContractNumber = `ДФ-${new Date().getFullYear()}-${String(Math.floor(Math.random()*9000)+1000)}`;
-              setContractNumber(newContractNumber);
-              setGenerationStep(5);
-              setGenerating(false);
-              try { sessionStorage.removeItem(contractDraftKey); } catch(e) {}
-            }, 300);
-          }, 800);
-        }, 700);
-      }, 500);
-    };
-    primaryAction = {
-      label: generationStep === 5
-        ? (signing ? "Передача подписанту..." : "📤 Передать подписанту банка")
-        : (generating ? "Генерация договора..." : "🔄 Сгенерировать ген.договор"),
-      icon: generationStep === 5 ? (signing ? Loader2 : ArrowRight) : (generating ? Loader2 : FileText),
-      disabled: generationStep === 5 ? false : (!accountNumber || generating),
-      onClick: generationStep === 5
-        ? () => doAdvance("contract_signing", {accountNumber, contractNumber, contractTemplate}, `Ген.договор ${contractNumber} передан подписанту`)
-        : runGeneration,
-    };
-  } else if (req.stage === "contract_signing") {
-    // Bank signer: requires PIN to sign ECP
-    primaryAction = {
-      label: signing ? "Подписание..." : "🔏 Подписать ЭЦП банка",
-      icon: signing ? Loader2 : Pen,
-      disabled: signing || pin.length !== 4,
-      onClick: () => doAdvance("client_signing", {docs: {...req.docs, generalContract: "signed_bank"}, signedByBank: currentUser.name, signedByBankDate: "2026-03-26"}, "Договор подписан банком. Отправлен клиенту"),
-    };
-  } else if (req.stage === "client_signing") {
-    // Waiting for client — no primary action, just reminder + mock "client signed"
-    primaryAction = {
-      label: signing ? "Переход..." : "🧪 Mock: клиент подписал",
-      icon: signing ? Loader2 : CheckCircle,
-      onClick: () => doAdvance("client_activation", {docs: {...req.docs, generalContract: "signed_all"}, signedByClientDate: "2026-03-26"}, "Клиент подписал. Переход на активацию"),
+      onClick: () => doAdvance("active", {}, `🎉 Клиент ${req.company} активирован. Может создавать уступки в рамках лимита.`),
     };
   } else if (req.stage === "grey_zone") {
     // Grey zone — reanimate back to analyst_verification
@@ -6767,10 +8011,10 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
       {/* ─── Block: Скоринг (с раскрываемым breakdown) ─── */}
       <ScoringBlock req={req} scoreColor={scoreColor} isExtended={isExtended} openScoringDoc={openScoringDoc}/>
 
-      {/* ─── Block: Подготовка договора (только для contract_preparation) ─── */}
-      {req.stage === "contract_preparation" && <div className="mb-4">
+      {/* ─── Block: Активация клиента (client_activation) ─── */}
+      {req.stage === "client_activation" && <div className="mb-4">
         <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Генерация ген.договора факторинга
+          Активация клиента
         </div>
 
         {/* Approved decision summary */}
@@ -6778,7 +8022,7 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
           <div className="flex items-center gap-2 mb-1">
             <CheckCircle size={12} style={{color: B.green}}/>
             <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.green}}>
-              Решение по заявке одобрено
+              Решение одобрено — лимит подтверждён
             </span>
           </div>
           <div className="grid grid-cols-3 gap-3 text-[11px] mt-1">
@@ -6788,214 +8032,15 @@ function RequestTaskForm({req, currentUser, onAction, setToast}) {
           </div>
         </div>
 
-        {generationStep < 5 && <>
-          {/* Step 1: account number + template */}
-          <div className="grid grid-cols-2 gap-3 mb-3">
-            <div>
-              <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
-                Номер счёта в АБС банка <span style={{color: B.red}}>*</span>
-              </label>
-              <input value={accountNumber} onChange={e => setAccountNumber(e.target.value)}
-                disabled={generating}
-                placeholder="3819000012345"
-                className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 mono"
-                style={{color: B.t1, background: generating ? "#F8FAFC" : "white"}}/>
-              <div className="text-[9px] mt-1" style={{color: B.t3}}>
-                Получите в АБС после заведения карточки клиента
-              </div>
-            </div>
-            <div>
-              <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>Шаблон договора</label>
-              <select value={contractTemplate} onChange={e => setContractTemplate(e.target.value)}
-                disabled={generating}
-                className="w-full px-2.5 py-1.5 text-sm rounded-lg border border-slate-200"
-                style={{color: B.t1, background: generating ? "#F8FAFC" : "white"}}>
-                <option value="standard">Стандартный (2026)</option>
-                <option value="short">Короткий (для &lt;100К)</option>
-                <option value="extended">Расширенный (с доп.условиями)</option>
-              </select>
-              <div className="text-[9px] mt-1" style={{color: B.t3}}>
-                Большинство случаев — стандартный шаблон
-              </div>
-            </div>
-          </div>
-
-          {/* Generation progress steps */}
-          {generating && <div className="p-3 rounded-xl mb-3" style={{background: B.accentL + "40", borderLeft: `3px solid ${B.accent}`}}>
-            <div className="text-[10px] font-bold mb-2" style={{color: B.accent}}>Платформа генерирует договор...</div>
-            <div className="space-y-1.5">
-              {[
-                {step: 1, label: "Загрузка данных клиента из АБС"},
-                {step: 2, label: "Заполнение шаблона договора"},
-                {step: 3, label: "Генерация PDF-файла"},
-                {step: 4, label: "Присвоение номера договора"},
-              ].map(s => <div key={s.step} className="flex items-center gap-2 text-[11px]">
-                {generationStep > s.step
-                  ? <CheckCircle size={12} style={{color: B.green}}/>
-                  : generationStep === s.step
-                    ? <Loader2 size={12} style={{color: B.accent}} className="animate-spin"/>
-                    : <div className="w-3 h-3 rounded-full border" style={{borderColor: B.border}}/>}
-                <span style={{color: generationStep >= s.step ? B.t1 : B.t3, fontWeight: generationStep === s.step ? 600 : 400}}>
-                  {s.label}
-                </span>
-              </div>)}
-            </div>
-          </div>}
-
-          {/* What will happen explainer */}
-          {!generating && <div className="text-[10px] p-2.5 rounded-lg mb-3" style={{background: "#F8FAFC", color: B.t2}}>
-            <strong style={{color: B.t1}}>Что произойдёт при генерации:</strong>
-            <ul className="mt-1 space-y-0.5 ml-4 list-disc">
-              <li>Платформа вытянет данные клиента из АБС по номеру счёта</li>
-              <li>Заполнит выбранный шаблон суммой лимита {fmtByn(req.approvedLimit || 0)}, ставкой {req.approvedRate || 25}% и параметрами клиента</li>
-              <li>Сформирует PDF-файл договора и присвоит уникальный номер</li>
-              <li>Договор попадёт в очередь подписанту банка на подпись ЭЦП</li>
-            </ul>
-          </div>}
-        </>}
-
-        {/* Generated contract preview */}
-        {generationStep === 5 && contractNumber && <div className="p-4 rounded-xl mb-3" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
-              <FileText size={20} style={{color: B.green}}/>
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-bold" style={{color: B.green}}>✓ Договор сгенерирован</div>
-              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
-                Генеральный договор факторинга <span className="mono">№{contractNumber}</span>
-              </div>
-              <div className="text-[10px] mt-1" style={{color: B.t2}}>
-                Клиент: {req.company} · Лимит: {fmtByn(req.approvedLimit || 0)} · Счёт: <span className="mono">{accountNumber}</span>
-              </div>
-              <div className="flex items-center gap-2 mt-2">
-                <button onClick={() => setShowPreview(true)}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
-                  <Eye size={11}/> Открыть превью
-                </button>
-                <span style={{color: B.t3}}>·</span>
-                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
-                  <Download size={11}/> Скачать PDF
-                </button>
-                <span style={{color: B.t3}}>·</span>
-                <button onClick={() => {setGenerationStep(0); setContractNumber(null);}}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.t2}}>
-                  <RefreshCw size={11}/> Перегенерировать
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>}
-      </div>}
-
-      {/* ─── Block: Подписание банком (contract_signing) ─── */}
-      {req.stage === "contract_signing" && <div className="mb-4">
-        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Подписание ген.договора ЭЦП банка
-        </div>
-
-        {/* Contract info card */}
-        <div className="p-4 rounded-xl mb-3" style={{background: "#ECFEFF", borderLeft: `3px solid #06B6D4`}}>
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
-              <FileText size={20} style={{color: "#06B6D4"}}/>
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-bold" style={{color: "#06B6D4"}}>Договор готов к подписи</div>
-              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
-                Генеральный договор факторинга {req.contractNumber && <span className="mono">№{req.contractNumber}</span>}
-              </div>
-              <div className="text-[10px] mt-1" style={{color: B.t2}}>
-                Клиент: <strong>{req.company}</strong> · Лимит: <strong className="mono">{fmtByn(req.approvedLimit || 0)}</strong> · Счёт: <span className="mono">{req.accountNumber || "—"}</span>
-              </div>
-              <div className="text-[10px] mt-1" style={{color: B.t3}}>
-                Подготовил: {req.preparedBy || "УСКО"}
-              </div>
-              <div className="flex items-center gap-2 mt-2">
-                <button onClick={() => setShowPreview(true)}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
-                  <Eye size={11}/> Открыть превью
-                </button>
-                <span style={{color: B.t3}}>·</span>
-                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
-                  <Download size={11}/> Скачать PDF
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* PIN input for ECP signature */}
-        <div className="mb-3">
-          <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
-            PIN-код ЭЦП банка <span style={{color: B.red}}>*</span>
-          </label>
-          <input type="password" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-            placeholder="••••"
-            maxLength={4}
-            className="w-full px-3 py-2 text-lg rounded-lg border border-slate-200 mono text-center tracking-widest"
-            style={{color: B.t1, letterSpacing: "0.5em"}}/>
-          <div className="text-[9px] mt-1" style={{color: B.t3}}>
-            4 цифры. Демо-режим: любые 4 цифры подойдут.
-          </div>
-        </div>
-
-        {/* Return to USKO link */}
-        <div className="flex items-center justify-center pb-2 border-b mb-2" style={{borderColor: B.border}}>
-          <button onClick={() => {setReturnIssues([]); setReturnComment(""); setReturnToUskoModal(true);}}
-            className="text-[11px] font-semibold hover:underline flex items-center gap-1" style={{color: B.red}}>
-            ↩ Вернуть УСКО на доработку
-          </button>
-        </div>
-
-        <div className="text-[10px] italic flex items-center gap-1" style={{color: B.t3}}>
-          <Info size={10}/>Ваша ЭЦП → договор уйдёт клиенту. Если в договоре ошибка — верните на доработку.
-        </div>
-      </div>}
-
-      {/* ─── Block: Ожидание клиента (client_signing) ─── */}
-      {req.stage === "client_signing" && <div className="mb-4">
-        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Ожидание подписи клиента
-        </div>
-
-        <div className="p-4 rounded-xl mb-3" style={{background: "#F0F9FF", borderLeft: `3px solid #0891B2`}}>
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 text-2xl" style={{background: "white"}}>
-              ⏳
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-bold" style={{color: "#0891B2"}}>Клиент подписывает договор</div>
-              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
-                Договор отправлен в личный кабинет клиента
-              </div>
-              <div className="text-[11px] mt-1" style={{color: B.t2}}>
-                <strong>{req.company}</strong> должен подписать ген.договор ЭЦП в своём кабинете.
-                Платформа автоматически продвинет этап вперёд после подписи.
-              </div>
-              {req.signedByBankDate && <div className="text-[10px] mt-2" style={{color: B.t3}}>
-                Банк подписал: {req.signedByBankDate} · {req.signedByBank || "—"}
-              </div>}
-            </div>
-          </div>
-        </div>
-
-        {/* Reminder action */}
-        <div className="flex gap-2 mb-2">
-          <Btn size="sm" variant="ghost" icon={Mail} className="flex-1"
-            onClick={() => setToast && setToast({msg: "Напоминание отправлено клиенту на email", type: "info"})}>
-            Напомнить на email
-          </Btn>
-          <Btn size="sm" variant="ghost" icon={Bell} className="flex-1"
-            onClick={() => setToast && setToast({msg: "SMS-напоминание отправлено", type: "info"})}>
-            SMS-напоминание
-          </Btn>
-        </div>
-
-        <div className="text-[10px] italic flex items-center gap-1" style={{color: B.t3}}>
-          <Info size={10}/>Клиент подписывает в своём кабинете. Ниже — mock-кнопка для демо.
+        {/* Activation explainer */}
+        <div className="text-[11px] p-3 rounded-lg mb-3" style={{background: "#F8FAFC", color: B.t2}}>
+          <strong style={{color: B.t1}}>Что произойдёт после активации:</strong>
+          <ul className="mt-1.5 space-y-1 ml-4 list-disc">
+            <li>Клиент получит доступ к созданию уступок в своём личном кабинете</li>
+            <li>Сможет приглашать должников на верификацию (Шаг 0 факторингового конвейера)</li>
+            <li>На каждую уступку формируется отдельный договор факторинга на 1 страничку (на день, по реестру ТТН)</li>
+            <li>Подписание ГДФ <strong>больше не требуется</strong> — он отменён в новой схеме</li>
+          </ul>
         </div>
       </div>}
 
@@ -8153,7 +9198,7 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
 
   // Exclude fully-closed cycle ("debtor_paid") and unreachable error state ("returned_to_supplier") from main funnel
   // Note: "paid" is no longer a terminal state — it transitions to "awaiting_debtor"
-  const activeAssignments = (assignmentsData || []).filter(a => a.stage !== "debtor_paid");
+  const activeAssignments = (assignmentsData || []).filter(a => a.stage !== "assignment_closed");
 
   // Phase stats
   const phaseStats = ASSIGNMENT_PHASES.map(phase => {
@@ -8191,23 +9236,51 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
   // Currently-showing stages (if a phase is active — show its stages)
   const visibleStages = activePhase && activePhase !== "all" ? stageStatsForPhase(activePhase) : null;
 
+  // ─── Сводная статистика ───
+  const totalAmount = activeAssignments.reduce((s, a) => s + (a.amount || 0), 0);
+  const phasesWithBottleneck = phaseStats.filter(p => p.count >= OVERLOAD_THRESHOLD || p.overdueCount > 0);
+  const bottleneckPhase = phasesWithBottleneck.length > 0
+    ? phasesWithBottleneck.sort((a, b) => (b.overdueCount - a.overdueCount) || (b.count - a.count))[0]
+    : null;
+
   return <Card className="mb-5">
+    {/* ═══ Сводная строка (всегда видно) ═══ */}
     <button onClick={() => setExpandedBool(!expandedBool)}
-      className="w-full flex items-center justify-between gap-3 p-3 hover:bg-slate-50 transition-colors text-left">
-      <div className="flex items-center gap-2">
-        {expandedBool ? <ChevronDown size={14} style={{color: B.t3}}/> : <ChevronRight size={14} style={{color: B.t3}}/>}
-        <span className="text-sm font-bold" style={{color: B.t1}}>Воронка уступок</span>
-        <span className="text-[10px]" style={{color: B.t3}}>
-          · {totalCount} {totalCount === 1 ? "уступка" : (totalCount >= 2 && totalCount <= 4) ? "уступки" : "уступок"} в работе
-          {totalOverdue > 0 && <span style={{color: B.red}}> · {totalOverdue} {totalOverdue === 1 ? "просрочка" : "просрочек"}</span>}
-        </span>
+      className="w-full flex items-center justify-between gap-3 p-4 hover:bg-slate-50 transition-colors text-left">
+      <div className="flex items-center gap-3 flex-wrap min-w-0">
+        <span className="text-base">📊</span>
+        <span className="text-sm font-black" style={{color: B.t1}}>Воронка уступок</span>
+
+        {/* Основные KPI */}
+        <div className="flex items-center gap-4 text-[11px] flex-wrap">
+          <div className="flex items-center gap-1.5">
+            <span style={{color: B.t3}}>В работе:</span>
+            <strong style={{color: B.t1}}>{totalCount}</strong>
+          </div>
+          {totalOverdue > 0 && <div className="flex items-center gap-1.5">
+            <AlertTriangle size={11} style={{color: B.red}} className="animate-pulse"/>
+            <span style={{color: B.red}}>{totalOverdue} {totalOverdue === 1 ? "просрочка" : "просрочек"}</span>
+          </div>}
+          <div className="flex items-center gap-1.5">
+            <span style={{color: B.t3}}>💰 Объём:</span>
+            <strong className="mono" style={{color: B.t1}}>{fmtByn(totalAmount)}</strong>
+          </div>
+          {bottleneckPhase && <div className="flex items-center gap-1.5 px-2 py-0.5 rounded" style={{background: B.yellowL}}>
+            <span style={{color: B.yellow}}>⚠ Затор:</span>
+            <strong style={{color: B.yellow}}>{ASSIGNMENT_PHASES.find(ph => ph.id === bottleneckPhase.id)?.label}</strong>
+            <span style={{color: B.t3}}>({bottleneckPhase.count})</span>
+          </div>}
+        </div>
       </div>
-      <span className="text-[10px]" style={{color: B.t3}}>{expandedBool ? "Свернуть" : "Развернуть"}</span>
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-[10px]" style={{color: B.t3}}>{expandedBool ? "Свернуть" : "Развернуть детали"}</span>
+        {expandedBool ? <ChevronDown size={14} style={{color: B.t3}}/> : <ChevronRight size={14} style={{color: B.t3}}/>}
+      </div>
     </button>
 
     {expandedBool && <div className="p-4 pt-0">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <div className="text-[10px]" style={{color: B.t3}}>Кликните на фазу или этап для фильтрации списка</div>
+        <div className="text-[10px]" style={{color: B.t3}}>👆 Кликните на фазу для фильтрации, на этап — чтобы увидеть уступки</div>
         <div className="flex items-center gap-3 text-[10px]" style={{color: B.t3}}>
           <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full" style={{background: B.border}}/>Пусто</div>
           <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full" style={{background: B.accent}}/>Норма</div>
@@ -8216,8 +9289,8 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
         </div>
       </div>
 
-      {/* 4 phase cards */}
-      <div className="flex items-stretch gap-0 overflow-x-auto pb-1">
+      {/* Phase cards: vertical on mobile, horizontal on desktop */}
+      <div className="flex flex-col md:flex-row md:items-stretch gap-2 md:gap-0 md:overflow-x-auto pb-1">
         {phaseStats.map((p, idx) => {
           const load = getLoad(p.count);
           const color = load === "empty" ? B.border : load === "overload" ? B.yellow : B.accent;
@@ -8228,7 +9301,7 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
 
           return <React.Fragment key={p.id}>
             <button onClick={() => onPhaseClick && onPhaseClick(p.id)}
-              className="relative flex-1 min-w-[140px] flex flex-col items-stretch rounded-xl overflow-hidden transition-all hover:shadow-md hover:-translate-y-0.5 text-left"
+              className="relative flex-1 md:min-w-[140px] flex flex-col items-stretch rounded-xl overflow-hidden transition-all hover:shadow-md hover:-translate-y-0.5 text-left"
               style={{
                 background: "white",
                 border: isActive ? `2px solid ${color}` : `1px solid ${B.border}`,
@@ -8265,20 +9338,56 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
                 <div className="text-[10px] font-medium leading-tight" style={{color: isActive ? color : B.t2}}>
                   {p.description}
                 </div>
-                {p.bankAction && <div className="flex items-start gap-1 pt-1.5 border-t border-dashed" style={{borderColor: B.border}}>
-                  <span className="text-[9px] shrink-0 mt-0.5" style={{color: B.t3}}>Что делает банк:</span>
-                </div>}
-                {p.bankAction && <div className="text-[10px] font-semibold leading-tight" style={{color: B.t1}}>
-                  {p.bankAction}
-                </div>}
+                {/* Top-3 assignments preview in this phase */}
+                {(() => {
+                  const phaseStageIds = ASSIGNMENT_STAGES.filter(s => s.phase === p.id).map(s => s.id);
+                  const phaseAssignments = activeAssignments.filter(a => phaseStageIds.includes(a.stage));
+                  if (phaseAssignments.length === 0) return null;
+                  // Сортировка: просрочки первыми, потом по дням desc
+                  const sorted = [...phaseAssignments].sort((a, b) => {
+                    const aLim = ASSIGNMENT_SLA_LIMITS[a.stage];
+                    const bLim = ASSIGNMENT_SLA_LIMITS[b.stage];
+                    const aDays = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(a) : 0;
+                    const bDays = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(b) : 0;
+                    const aOver = aLim && aLim.days > 0 && aDays > aLim.days;
+                    const bOver = bLim && bLim.days > 0 && bDays > bLim.days;
+                    if (aOver && !bOver) return -1;
+                    if (!aOver && bOver) return 1;
+                    return bDays - aDays;
+                  });
+                  const top3 = sorted.slice(0, 3);
+                  return <div className="pt-1 border-t border-dashed space-y-0.5" style={{borderColor: B.border}}>
+                    <div className="text-[9px] font-bold" style={{color: B.t3}}>Уступки в этой фазе:</div>
+                    {top3.map(asg => {
+                      const aStage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
+                      const aLim = ASSIGNMENT_SLA_LIMITS[asg.stage];
+                      const aDays = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(asg) : 0;
+                      const aOver = aLim && aLim.days > 0 && aDays > aLim.days;
+                      return <div key={asg.id} className="flex items-center justify-between gap-1 text-[9px]"
+                        title={`${asg.id} · ${aStage?.label} · ${aDays}д на этапе`}>
+                        <div className="flex items-center gap-1 min-w-0">
+                          <span className="w-1 h-1 rounded-full shrink-0" style={{background: aStage?.color || color}}/>
+                          <span className="mono font-bold truncate" style={{color: B.t1}}>{asg.id}</span>
+                          <span className="truncate" style={{color: B.t3}}>· {aStage?.label}</span>
+                          {aOver && <span className="text-[8px] px-1 rounded font-bold shrink-0" style={{background: B.red, color: "white"}}>⚠</span>}
+                        </div>
+                        <span className="mono font-semibold shrink-0" style={{color: B.t2}}>{fmtByn(asg.amount || 0)}</span>
+                      </div>;
+                    })}
+                    {phaseAssignments.length > 3 && <div className="text-[8px] italic" style={{color: B.t3}}>
+                      ...и ещё {phaseAssignments.length - 3} {phaseAssignments.length - 3 === 1 ? "уступка" : "уступок"}
+                    </div>}
+                  </div>;
+                })()}
                 {p.actorsInvolved && <div className="text-[9px] italic leading-tight pt-1 border-t border-dashed" style={{color: B.t3, borderColor: B.border}}>
                   Участники: {p.actorsInvolved}
                 </div>}
               </div>
             </button>
 
-            {idx < phaseStats.length - 1 && <div className="flex items-center shrink-0 px-1" style={{color: B.t3}}>
-              <ChevronRight size={18}/>
+            {idx < phaseStats.length - 1 && <div className="flex items-center justify-center shrink-0 md:px-1" style={{color: B.t3}}>
+              <ChevronRight size={18} className="hidden md:block"/>
+              <ChevronDown size={14} className="md:hidden"/>
             </div>}
           </React.Fragment>;
         })}
@@ -8293,42 +9402,110 @@ function AssignmentWorkflowHealthBanner({assignmentsData, onPhaseClick, activePh
           {visibleStages.map((s, idx) => {
             const isStageActive = activeStage === s.id;
             const isActionable = s.actor === "bank" || s.actor === "platform";
-            return <button key={s.id} onClick={() => onStageClick && onStageClick(s.id)}
-              className="flex items-start gap-3 p-2.5 rounded-lg border transition-all hover:shadow-sm text-left"
-              style={isStageActive
-                ? {background: s.color + "15", borderColor: s.color, borderWidth: 2}
-                : {background: "white", borderColor: B.border}}>
-              {/* Number circle */}
-              <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-[10px] font-black"
-                style={{background: s.color + "20", color: s.color}}>
-                {idx + 1}
-              </div>
+            // Уступки на этом этапе
+            const stageAssignments = activeAssignments.filter(a => a.stage === s.id);
 
-              <div className="flex-1 min-w-0 space-y-1">
-                {/* Stage name + count */}
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[11px] font-bold" style={{color: B.t1}}>{s.label}</span>
-                  <span className="px-1.5 py-0.5 rounded text-[9px] font-black"
-                    style={{background: s.count > 0 ? s.color + "30" : "#F1F5F9", color: s.count > 0 ? s.color : B.t3}}>
-                    {s.count}
-                  </span>
-                  {s.overdueCount > 0 && <span className="text-[9px] font-bold flex items-center gap-0.5" style={{color: B.red}}>
-                    <AlertTriangle size={9} className="animate-pulse"/>
-                    {s.overdueCount}
-                  </span>}
+            return <div key={s.id}
+              className="rounded-lg border transition-all overflow-hidden"
+              style={isStageActive
+                ? {background: s.color + "10", borderColor: s.color, borderWidth: 2}
+                : {background: "white", borderColor: B.border}}>
+              <button onClick={() => onStageClick && onStageClick(s.id)}
+                className="w-full flex items-start gap-3 p-2.5 hover:bg-slate-50 transition-colors text-left">
+                {/* Number circle */}
+                <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-[10px] font-black"
+                  style={{background: s.color + "20", color: s.color}}>
+                  {idx + 1}
                 </div>
 
-                {/* Who acts */}
-                {s.whoActs && <div className="text-[9px] font-semibold" style={{color: isActionable ? s.color : B.t3}}>
-                  {s.whoActs}
-                </div>}
+                <div className="flex-1 min-w-0 space-y-1">
+                  {/* Stage name + count */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[11px] font-bold" style={{color: B.t1}}>{s.label}</span>
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-black"
+                      style={{background: s.count > 0 ? s.color + "30" : "#F1F5F9", color: s.count > 0 ? s.color : B.t3}}>
+                      {s.count}
+                    </span>
+                    {s.overdueCount > 0 && <span className="text-[9px] font-bold flex items-center gap-0.5" style={{color: B.red}}>
+                      <AlertTriangle size={9} className="animate-pulse"/>
+                      {s.overdueCount}
+                    </span>}
+                  </div>
 
-                {/* Action hint */}
-                {s.actionHint && <div className="text-[10px] leading-tight" style={{color: B.t2}}>
-                  {s.actionHint}
-                </div>}
-              </div>
-            </button>;
+                  {/* Who acts */}
+                  {s.whoActs && <div className="text-[9px] font-semibold" style={{color: isActionable ? s.color : B.t3}}>
+                    {s.whoActs}
+                  </div>}
+
+                  {/* Tasks count + click hint */}
+                  {(() => {
+                    const stageTasks = ASSIGNMENT_TASKS[s.id] || [];
+                    return <div className="flex items-center gap-2 text-[10px]" style={{color: B.t2}}>
+                      {stageTasks.length > 0 && <span>
+                        📋 <strong>{stageTasks.length}</strong> задач
+                      </span>}
+                      {s.count > 0 && <span style={{color: isStageActive ? s.color : B.accent}}>
+                        {isStageActive ? "↑ Скрыть уступки" : "↓ Показать уступки"}
+                      </span>}
+                    </div>;
+                  })()}
+                </div>
+              </button>
+
+              {/* Assignment list — when stage is active */}
+              {isStageActive && stageAssignments.length > 0 && <div className="px-2.5 pb-2.5 pt-0">
+                <div className="text-[9px] font-bold uppercase tracking-wider mb-1.5" style={{color: B.t3}}>
+                  Уступки на этом этапе
+                </div>
+                <div className="space-y-1">
+                  {stageAssignments.map(asg => {
+                    const asgCreditor = COMPANIES.find(c => c.id === asg.creditorId);
+                    const asgDebtor = COMPANIES.find(c => c.id === asg.debtorId);
+                    const days = typeof getAssignmentDaysOnStage === "function" ? getAssignmentDaysOnStage(asg) : 0;
+                    const limit = ASSIGNMENT_SLA_LIMITS[asg.stage];
+                    const isOverdue = limit && limit.days > 0 && days > limit.days;
+                    const stageTasksList = ASSIGNMENT_TASKS[asg.stage] || [];
+                    const completedTasksCount = stageTasksList.filter(t => asg.completedTasks?.[t.id]).length;
+                    const requiredTasksCount = stageTasksList.filter(t => t.required).length;
+
+                    return <button key={asg.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (typeof window !== "undefined") {
+                          window.dispatchEvent(new CustomEvent("oborotka:nav", {detail: {page: "assignment-detail", asgId: asg.id}}));
+                        }
+                      }}
+                      className="w-full text-left p-2 rounded transition-all hover:shadow-sm"
+                      style={{background: "white", border: `1px solid ${isOverdue ? B.red + "40" : B.border}`}}>
+                      <div className="flex items-center justify-between gap-2 mb-0.5">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-[10px] mono font-bold" style={{color: B.t1}}>{asg.id}</span>
+                          {asg.dfNumber && <span className="text-[9px] mono" style={{color: B.t3}}>· {asg.dfNumber}</span>}
+                          {isOverdue && <span className="text-[8px] px-1 py-0.5 rounded font-bold" style={{background: B.red, color: "white"}}>⚠ {days - limit.days}д</span>}
+                        </div>
+                        <span className="text-[10px] mono font-bold shrink-0" style={{color: B.t1}}>{fmtByn(asg.amount || 0)}</span>
+                      </div>
+                      <div className="text-[9px] truncate" style={{color: B.t2}}>
+                        <span style={{color: B.t3}}>От:</span> {asgCreditor?.name || "—"}
+                        <span style={{color: B.t3}}> · К:</span> {asgDebtor?.name || asg.debtorCompanyHint || "—"}
+                      </div>
+                      {requiredTasksCount > 0 && <div className="flex items-center justify-between mt-1">
+                        <div className="flex items-center gap-1 text-[9px]" style={{color: B.t3}}>
+                          <span>📋 {completedTasksCount}/{requiredTasksCount} задач</span>
+                        </div>
+                        <div className="flex-1 h-0.5 mx-2 rounded-full overflow-hidden" style={{background: "#E2E8F0"}}>
+                          <div className="h-full transition-all" style={{
+                            width: `${requiredTasksCount > 0 ? (completedTasksCount / requiredTasksCount) * 100 : 0}%`,
+                            background: completedTasksCount === requiredTasksCount ? B.green : (s.color),
+                          }}/>
+                        </div>
+                        <span className="text-[9px]" style={{color: days > 0 ? B.t2 : B.t3}}>{days}д</span>
+                      </div>}
+                    </button>;
+                  })}
+                </div>
+              </div>}
+            </div>;
           })}
         </div>
       </div>}
@@ -8453,8 +9630,8 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
             const sla = getAssignmentSlaInfo(a);
             const bankOver = isAssignmentBankOverdue(a);
             const waitingClient = isAssignmentWaitingClient(a);
-            const isClosed = a.stage === "debtor_paid"; // fully closed cycle
-            const isPaidToClient = a.stage === "paid"; // paid to client, awaiting debtor
+            const isClosed = a.stage === "assignment_closed"; // fully closed cycle
+            const isPaidToClient = a.stage === "payment_disbursed"; // paid to client, awaiting debtor
             const isDebtorOverdue = a.stage === "debtor_overdue" || a.stage === "debtor_defaulted";
             const isChecked = selectedIds?.includes(a.id);
 
@@ -8478,7 +9655,7 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span>{phase?.icon}</span>
                   <span className="text-[11px]" style={{color: stage?.color || B.t2}}>{stage?.label || a.stage}</span>
-                  {a.stage === "usko_checking" && !a.uskoTakenBy && <span
+                  {a.stage === "usko_review" && !a.uskoTakenBy && <span
                     className="px-1.5 py-0.5 rounded text-[9px] font-black animate-pulse"
                     style={{background: B.accent, color: "white"}}>
                     🆕 НОВАЯ
@@ -8487,7 +9664,7 @@ function AssignmentTableView({items, onSelect, onSelectBatch, batchMode, selecte
               </td>
               <td className="px-3 py-2 text-right">
                 {isClosed ? <span className="text-[10px]" style={{color: B.green}}>✓ Закрыта</span>
-                  : a.stage === "awaiting_debtor" && a.dueDate ? <span className="text-[10px] mono" style={{color: "#6366F1"}}>
+                  : a.stage === "awaiting_debtor_payment" && a.dueDate ? <span className="text-[10px] mono" style={{color: "#6366F1"}}>
                       до {a.dueDate.slice(5)}
                     </span>
                   : a.stage === "debtor_overdue" ? <span className="text-[10px] font-bold" style={{color: B.red}}>
@@ -8525,8 +9702,8 @@ function AssignmentPhaseWorkflow({asg, compact=false}) {
   const currentPhase = getAssignmentPhase(asg.stage);
   const currentStage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
   const phaseIdx = ASSIGNMENT_PHASES.findIndex(p => p.id === currentPhase);
-  const isReturned = asg.stage === "returned_to_supplier";
-  const isFullyClosed = asg.stage === "debtor_paid";
+  const isReturned = asg.stage === "returned_to_creditor";
+  const isFullyClosed = asg.stage === "assignment_closed";
   const isDebtorIssue = asg.stage === "debtor_overdue" || asg.stage === "debtor_defaulted";
 
   if (isReturned) {
@@ -8704,10 +9881,12 @@ function AssignmentBadge({asg}) {
 function AssignmentCard({asg, onClick}) {
   const stage = ASSIGNMENT_STAGES.find(s=>s.id===asg.stage);
   const bankOver = isAssignmentBankOverdue(asg);
-  const isDone = asg.stage === "debtor_paid"; // полностью закрыто
-  const isReturned = asg.stage === "returned_to_supplier";
+  const isDone = asg.stage === "assignment_closed"; // полностью закрыто
+  const isReturned = asg.stage === "returned_to_creditor";
   const creditor = COMPANIES.find(c=>c.id===asg.creditorId);
   const debtor = COMPANIES.find(c=>c.id===asg.debtorId);
+  // Show compact signature chain on signing/abs phases
+  const showSignatures = ["df_signing_bank", "df_signing_creditor", "debtor_signing", "payment_authorization", "payment_disbursed"].includes(asg.stage);
 
   return <Card className={`cursor-pointer transition-all ${isDone?"opacity-70 hover:opacity-100":"hover:shadow-md hover:-translate-y-0.5"}`}
     onClick={onClick}
@@ -8728,6 +9907,9 @@ function AssignmentCard({asg, onClick}) {
         <div className="text-[11px]" style={{color:B.t2}}>
           <span style={{color:B.t3}}>Должник:</span> {debtor?.name||"—"}
         </div>
+        {showSignatures && <div className="mt-1.5">
+          <SignaturesProgress asg={asg} compact={true}/>
+        </div>}
         {isReturned && asg.returnReason && <div className="text-[10px] mt-1 truncate" style={{color:B.red}}>
           ⚠ {asg.returnReason.comment}
         </div>}
@@ -8745,7 +9927,7 @@ function AssignmentCard({asg, onClick}) {
 
 // Assignment workflow (3-stage compact)
 function AssignmentWorkflow({asg}) {
-  const stages = ASSIGNMENT_STAGES.filter(s => s.id !== "returned_to_supplier");
+  const stages = ASSIGNMENT_STAGES.filter(s => s.id !== "returned_to_creditor");
   const currentIdx = stages.findIndex(s => s.id === asg.stage);
   if (currentIdx === -1) {
     // Returned case — show special
@@ -8791,9 +9973,159 @@ function AssignmentWorkflow({asg}) {
 }
 
 // Client activity card (shows who's holding the assignment)
-// ═══════════════════════════════════════
-// STAGE MONITORING CARD
-// ═══════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// SignaturesProgress — визуальная цепочка из 5 подписей по уступке
+// 1) bank (ДФ) → 2) creditor_df → 3) creditor_act → 4) debtor_act → 5) debtor_notification
+// Используется в карточках на этапах sign / финал
+// ═══════════════════════════════════════════════════════════
+function SignaturesProgress({asg, compact = false}) {
+  const sigs = getAssignmentSignatures(asg);
+  if (!sigs) return null;
+  const items = [
+    {key: "bank",                label: "Банк (ДФ)",            actor: "🏦", color: "#06B6D4"},
+    {key: "creditor_df",         label: "Кредитор (ДФ)",        actor: "👤", color: "#0891B2"},
+    {key: "creditor_act",        label: "Кредитор (акт)",       actor: "👤", color: "#0891B2"},
+    {key: "debtor_act",          label: "Должник (акт)",        actor: "🚚", color: "#A855F7"},
+    {key: "debtor_notification", label: "Должник (уведомление)", actor: "🚚", color: "#A855F7"},
+  ];
+  const signedCount = items.filter(it => sigs[it.key]?.signed).length;
+  const allSigned = signedCount === items.length;
+
+  if (compact) {
+    return <div className="flex items-center gap-1.5">
+      <span className="text-[10px] font-semibold" style={{color: B.t3}}>Подписи:</span>
+      <div className="flex items-center gap-0.5">
+        {items.map((it, i) => {
+          const signed = sigs[it.key]?.signed;
+          return <div key={it.key} className="w-2 h-2 rounded-full" title={`${it.label}: ${signed ? "✓" : "ждём"}`}
+            style={{background: signed ? it.color : "#E2E8F0"}}/>;
+        })}
+      </div>
+      <span className="text-[10px] mono" style={{color: allSigned ? B.green : B.t3}}>
+        {signedCount}/{items.length}
+      </span>
+    </div>;
+  }
+
+  return <div className="p-3 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+    <div className="flex items-center justify-between mb-2">
+      <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>
+        Цепочка подписей
+      </div>
+      <span className="text-[10px] mono" style={{color: allSigned ? B.green : B.t2}}>
+        {signedCount}/{items.length} подписано
+      </span>
+    </div>
+    <div className="flex items-center gap-1.5">
+      {items.map((it, i) => {
+        const signed = sigs[it.key]?.signed;
+        const sigDate = sigs[it.key]?.signedAt;
+        return <React.Fragment key={it.key}>
+          <div className="flex flex-col items-center gap-0.5 flex-1 min-w-0" title={sigDate ? `${it.label} · ${sigDate}` : it.label}>
+            <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold transition-colors"
+              style={{
+                background: signed ? it.color : "white",
+                color: signed ? "white" : B.t3,
+                border: `2px solid ${signed ? it.color : "#E2E8F0"}`,
+              }}>
+              {signed ? "✓" : it.actor}
+            </div>
+            <div className="text-[9px] text-center font-semibold leading-tight"
+              style={{color: signed ? B.t1 : B.t3}}>
+              {it.label}
+            </div>
+          </div>
+          {i < items.length - 1 && <div className="w-2 h-0.5"
+            style={{background: signed && sigs[items[i+1].key]?.signed ? items[i+1].color : "#E2E8F0"}}/>}
+        </React.Fragment>;
+      })}
+    </div>
+  </div>;
+}
+
+// ═══════════════════════════════════════════════════════════
+// AssignmentStepper — горизонтальный stepper всех этапов уступки
+// Показывает: пройденные этапы (цвет фазы) → текущий (пульс) → будущие (серые)
+// Это контекст «Где я в процессе»
+// ═══════════════════════════════════════════════════════════
+function AssignmentStepper({asg}) {
+  if (!asg) return null;
+  // Берём все этапы кроме особых веток
+  const linearStages = ASSIGNMENT_STAGES.filter(s =>
+    !["debtor_overdue", "debtor_defaulted", "returned_to_creditor"].includes(s.id)
+  );
+  const currentIdx = linearStages.findIndex(s => s.id === asg.stage);
+  const isOnSpecialBranch = currentIdx === -1;
+  const currentStageInfo = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
+
+  if (isOnSpecialBranch) {
+    // Особый случай: уступка на ветке (просрочка/дефолт/возврат)
+    return <Card className="p-3 mb-4" style={{background: B.redL, borderColor: B.red + "40"}}>
+      <div className="flex items-center gap-2">
+        <AlertTriangle size={14} style={{color: B.red}}/>
+        <span className="text-[11px] font-bold" style={{color: B.red}}>Особая ветка:</span>
+        <span className="text-[11px]" style={{color: B.t1}}>{currentStageInfo?.label}</span>
+      </div>
+    </Card>;
+  }
+
+  return <Card className="p-3 mb-4" style={{background: "white"}}>
+    <div className="flex items-center justify-between mb-2">
+      <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>
+        Прогресс по конвейеру
+      </div>
+      <div className="text-[10px]" style={{color: B.t2}}>
+        Этап <strong style={{color: B.t1}}>{currentIdx + 1}</strong> из <strong style={{color: B.t1}}>{linearStages.length}</strong>
+        {currentStageInfo && <span style={{color: currentStageInfo.color}}> · {currentStageInfo.label}</span>}
+      </div>
+    </div>
+
+    {/* Stepper line */}
+    <div className="flex items-center gap-0.5 overflow-x-auto pb-1">
+      {linearStages.map((s, idx) => {
+        const isPast = idx < currentIdx;
+        const isCurrent = idx === currentIdx;
+        const isFuture = idx > currentIdx;
+        const phase = ASSIGNMENT_PHASES.find(p => p.id === s.phase);
+        return <React.Fragment key={s.id}>
+          <div className="flex flex-col items-center gap-0.5 shrink-0" title={`${s.label} · ${phase?.label || ""}`}>
+            <div className="w-3 h-3 rounded-full flex items-center justify-center transition-all"
+              style={{
+                background: isPast ? s.color : isCurrent ? s.color : "#E2E8F0",
+                boxShadow: isCurrent ? `0 0 0 3px ${s.color}30` : "none",
+                animation: isCurrent ? "pulse 2s infinite" : "none",
+              }}>
+              {isPast && <span style={{color: "white", fontSize: 8, lineHeight: 1}}>✓</span>}
+            </div>
+            {isCurrent && <div className="text-[8px] font-bold" style={{color: s.color, whiteSpace: "nowrap"}}>
+              ↑
+            </div>}
+          </div>
+          {idx < linearStages.length - 1 && <div className="flex-1 h-0.5 min-w-[8px]"
+            style={{background: idx < currentIdx ? s.color : "#E2E8F0"}}/>}
+        </React.Fragment>;
+      })}
+    </div>
+
+    {/* Phase markers below */}
+    <div className="flex items-center justify-between mt-2 pt-2 border-t" style={{borderColor: B.border}}>
+      {ASSIGNMENT_PHASES.map(phase => {
+        const phaseStages = linearStages.filter(s => s.phase === phase.id);
+        const phaseStartIdx = linearStages.findIndex(s => s.phase === phase.id);
+        const phaseEndIdx = phaseStartIdx + phaseStages.length - 1;
+        const isPastPhase = currentIdx > phaseEndIdx;
+        const isCurrentPhase = currentIdx >= phaseStartIdx && currentIdx <= phaseEndIdx;
+        return <div key={phase.id} className="text-[9px] font-semibold flex items-center gap-1"
+          style={{color: isPastPhase ? B.green : isCurrentPhase ? B.t1 : B.t3}}>
+          <span>{phase.icon}</span>
+          <span className="hidden md:inline">{phase.label}</span>
+        </div>;
+      })}
+    </div>
+  </Card>;
+}
+
+
 // Показывается когда на этапе работает другой банковский сотрудник
 // и текущий пользователь не может действовать. Не "пустой", а полноценный
 // мониторинг: что происходит, SLA, что я делал/буду делать, действия для эскалации.
@@ -9003,6 +10335,157 @@ function ClientActivityCard({asg, setToast}) {
   </Card>;
 }
 
+// ═══════════════════════════════════════════════════════════
+// StageTasksPanel — список задач внутри текущего этапа уступки.
+// Рендерит чек-лист действий, которые двигают уступку вперёд.
+// Каждая задача = чекбокс + действие. Когда все required+isFinal выполнены → stage advance.
+// ═══════════════════════════════════════════════════════════
+function StageTasksPanel({asg, currentUser, onAction, onTaskComplete, setToast}) {
+  const tasks = getAssignmentTasks(asg);
+  if (!tasks || tasks.length === 0) return null;
+
+  const completedTasks = asg.completedTasks || {};
+  const stage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
+
+  const completedCount = tasks.filter(t => completedTasks[t.id]).length;
+  const totalCount = tasks.filter(t => t.required).length;
+  const progressPercent = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
+
+  const handleTaskClick = (task) => {
+    if (completedTasks[task.id]) return; // уже выполнено
+    if (task.role !== currentUser.role && currentUser.role !== "admin") {
+      setToast && setToast({msg: `Эта задача для роли ${task.role}`, type: "warning"});
+      return;
+    }
+    if (task.isClientAction) {
+      // Mock-кнопка для клиентских действий (демо)
+      const nextStage = resolveNextStage(asg, task);
+      onAction && onAction(nextStage, {
+        completedTasks: {...completedTasks, [task.id]: {at: new Date().toISOString().slice(0, 19).replace("T", " "), by: "Client (mock)"}},
+      }, `Клиент выполнил: ${task.label}`);
+      return;
+    }
+
+    // Mark task done
+    const newCompleted = {...completedTasks, [task.id]: {at: new Date().toISOString().slice(0, 19).replace("T", " "), by: currentUser.name}};
+
+    if (task.isFinal) {
+      // Финальная задача — двигаем stage вперёд
+      const nextStage = resolveNextStage(asg, task);
+      onAction && onAction(nextStage, {completedTasks: newCompleted}, `Этап «${stage?.label}» завершён → ${ASSIGNMENT_STAGES.find(s => s.id === nextStage)?.label || nextStage}`);
+    } else {
+      // Обычная задача — просто отмечаем выполнение
+      onTaskComplete && onTaskComplete(task.id, newCompleted);
+      setToast && setToast({msg: `✓ ${task.label}`, type: "success"});
+    }
+  };
+
+  return <Card className="p-5 mb-4" style={{borderColor: stage?.color || B.accent, borderWidth: 2, background: (stage?.color || B.accent) + "06"}}>
+    {/* Header */}
+    <div className="flex items-start justify-between mb-3 pb-3 border-b" style={{borderColor: B.border}}>
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl"
+          style={{background: "white", border: `2px solid ${stage?.color || B.accent}`}}>
+          {ASSIGNMENT_PHASES.find(p => p.id === stage?.phase)?.icon || "📋"}
+        </div>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: stage?.color || B.accent}}>
+            Этап «{stage?.label || asg.stage}»
+          </div>
+          <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
+            Задачи на этом этапе ({completedCount}/{totalCount})
+          </div>
+          <div className="text-[10px] mt-1" style={{color: B.t3}}>
+            Выполняйте задачи по порядку. Финальная задача ✓ переведёт уступку на следующий этап.
+          </div>
+        </div>
+      </div>
+      <div className="text-right shrink-0">
+        <div className="text-lg font-black mono" style={{color: progressPercent === 100 ? B.green : B.t2}}>
+          {Math.round(progressPercent)}%
+        </div>
+        <div className="text-[9px]" style={{color: B.t3}}>прогресс этапа</div>
+      </div>
+    </div>
+
+    {/* Progress bar */}
+    <div className="h-1.5 rounded-full overflow-hidden mb-3" style={{background: "#F1F5F9"}}>
+      <div className="h-full transition-all" style={{
+        width: `${progressPercent}%`,
+        background: progressPercent === 100 ? B.green : (stage?.color || B.accent),
+      }}/>
+    </div>
+
+    {/* Tasks list */}
+    <div className="space-y-1.5">
+      {tasks.map((task, idx) => {
+        const done = !!completedTasks[task.id];
+        const completion = completedTasks[task.id];
+        const isMyTask = task.role === currentUser.role || currentUser.role === "admin";
+        const canExecute = !done && isMyTask;
+        const isOptional = !task.required;
+        const isFinal = task.isFinal;
+
+        return <div key={task.id}
+          className={`p-3 rounded-lg transition-all ${canExecute ? "cursor-pointer hover:shadow-sm" : ""}`}
+          onClick={canExecute ? () => handleTaskClick(task) : undefined}
+          style={{
+            background: done ? B.greenL : isMyTask ? "white" : "#F8FAFC",
+            border: `1px solid ${done ? B.green + "40" : isFinal && canExecute ? (stage?.color || B.accent) + "60" : B.border}`,
+            opacity: !isMyTask && !done ? 0.6 : 1,
+          }}>
+          <div className="flex items-start gap-3">
+            {/* Checkbox / status */}
+            <div className="shrink-0 mt-0.5">
+              {done ? <div className="w-5 h-5 rounded-full flex items-center justify-center" style={{background: B.green}}>
+                <span className="text-white text-[10px] font-bold">✓</span>
+              </div> : <div className="w-5 h-5 rounded-full border-2"
+                style={{borderColor: isMyTask ? (stage?.color || B.accent) : B.border}}/>}
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-sm">{task.icon}</span>
+                <span className="text-xs font-bold" style={{color: done ? B.t3 : B.t1, textDecoration: done ? "line-through" : "none"}}>
+                  {idx + 1}. {task.label}
+                </span>
+                {isOptional && !done && <span className="text-[9px] px-1.5 py-0.5 rounded" style={{background: B.t3 + "15", color: B.t3}}>опционально</span>}
+                {isFinal && !done && <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold" style={{background: (stage?.color || B.accent) + "20", color: stage?.color || B.accent}}>
+                  ⚡ переводит на следующий этап
+                </span>}
+              </div>
+              <div className="flex items-center gap-2 mt-1 text-[10px]" style={{color: B.t3}}>
+                <span>👤 {ROLE_ACCESS[task.role]?.label || task.role}</span>
+                {task.durationMin > 0 && <>
+                  <span>·</span>
+                  <span>~{task.durationMin} мин</span>
+                </>}
+                {done && completion && <>
+                  <span>·</span>
+                  <span style={{color: B.green}}>✓ {completion.at} · {completion.by}</span>
+                </>}
+              </div>
+            </div>
+
+            {/* Action button */}
+            {canExecute && <Btn size="sm"
+              variant={isFinal ? "primary" : "ghost"}
+              onClick={(e) => { e.stopPropagation(); handleTaskClick(task); }}>
+              {isFinal ? "Завершить этап" : "Выполнить"}
+            </Btn>}
+          </div>
+        </div>;
+      })}
+    </div>
+
+    {progressPercent === 100 && <div className="mt-3 p-2.5 rounded-lg text-[11px] font-semibold flex items-center gap-2" style={{background: B.greenL, color: B.green}}>
+      <CheckCircle size={14}/>
+      Все задачи этапа выполнены — уступка переведена на следующий этап
+    </div>}
+  </Card>;
+}
+
 // Assignment action block (role-specific task on assignment)
 // ─── AssignmentTaskForm — unified form for all assignment stages ───
 // Mirrors RequestTaskForm: header + parameters + documents + stage-specific block + primary action
@@ -9034,23 +10517,8 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
 
   // Final / non-actionable state
   // ─── Final / non-actionable states ───
-  // "paid" — деньги отправлены клиенту, ждём должника (НЕ должно быть actor-action)
-  if (asg.stage === "paid") {
-    return <Card className="p-5 mb-5" style={{background: B.greenL, borderColor: B.green + "40"}}>
-      <div className="flex items-start gap-3">
-        <CheckCircle size={22} style={{color: B.green}} className="shrink-0 mt-0.5"/>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-bold" style={{color: B.green}}>✓ Финансирование выплачено клиенту</div>
-          <div className="text-xs mt-1" style={{color: B.t2}}>
-            Сумма <strong>{fmtByn(asg.toReceive || 0)}</strong> отправлена в АБС на счёт поставщика. Удержан дисконт <strong>{fmtByn(asg.discount || 0)}</strong>.
-          </div>
-          <div className="text-[11px] mt-2 p-2 rounded" style={{background: "white", color: B.t2}}>
-            ⏳ <strong>Следующий шаг:</strong> Платформа автоматически переведёт уступку в режим ожидания оплаты от должника.
-          </div>
-        </div>
-      </div>
-    </Card>;
-  }
+  // Раньше "paid" считался финальным; теперь payment_disbursed — это рабочий этап для УСКО.
+  // Финальное закрытие — assignment_closed (отдельный блок ниже в !canAct).
 
   // Если юзер не actor на текущем этапе — показать мониторинг (StageMonitoringCard)
   if (!canAct) {
@@ -9059,7 +10527,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       return <ClientActivityCard asg={asg} setToast={setToast}/>;
     }
     // Финальный успешный закрытый этап
-    if (asg.stage === "debtor_paid") {
+    if (asg.stage === "assignment_closed") {
       const economics = calculateAssignmentEconomics({amount: asg.amount, rate: 25, termDays: DEFAULT_ASSIGNMENT_TERM_DAYS});
       return <Card className="p-5 mb-5" style={{background: B.greenL, borderColor: B.green + "40", borderWidth: 1}}>
         <div className="flex items-start gap-3">
@@ -9084,6 +10552,10 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
                 <div style={{color: B.t3}}>Закрыто</div>
                 <div className="font-bold mono" style={{color: B.t1}}>{asg.debtorPaidDate || "—"}</div>
               </div>
+            </div>
+            {/* Цепочка подписей в финальном виде */}
+            <div className="mt-3">
+              <SignaturesProgress asg={asg}/>
             </div>
           </div>
         </div>
@@ -9163,52 +10635,141 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
 
   // ─── Primary action per stage ───
   let primaryAction = null;
-  if (asg.stage === "usko_checking") {
-    const allChecked = checkedDocs.dkp && checkedDocs.ttn && checkedDocs.eschf;
+
+  // ═══ Phase 0: Верификация должника ═══
+  if (asg.stage === "debtor_scoring") {
+    // Аналитик: проверяет скоринг должника, устанавливает лимит
     primaryAction = {
-      label: signing ? "Принимаю..." : "✓ Принять комплект и сформировать ДС",
+      label: signing ? "Подтверждение..." : "✓ Установить лимит должнику",
       icon: signing ? Loader2 : CheckCircle,
-      disabled: signing || !allChecked,
-      onClick: () => doAdvance("ds_preparing", {uskoCheckedBy: currentUser.name, uskoCheckedDate: "2026-03-26"}, `Комплект документов принят для ${asg.id}. Формирование ДС`),
+      disabled: signing,
+      onClick: () => doAdvance("debtor_verified", {
+        debtorVerifiedBy: currentUser.name,
+        debtorVerifiedDate: "2026-03-26",
+      }, `Должник верифицирован. Кредитор уведомлён, может создавать уступки`),
     };
-  } else if (asg.stage === "ds_preparing") {
+    secondaryAction = {
+      label: "Отклонить (плохой скоринг)",
+      icon: XCircle,
+      onClick: () => setToast && setToast({msg: "Должник отклонён. Кредитору отправлено уведомление", type: "warning"}),
+    };
+  }
+  // ═══ Phase 1: Создание уступки ═══
+  else if (asg.stage === "usko_review") {
+    const allChecked = checkedDocs.dkp && checkedDocs.ttn && checkedDocs.eschf;
+    const isExtended = (asg.amount || 0) > 50000;
+    primaryAction = {
+      label: signing ? "Принимаю..."
+        : isExtended ? "✓ Передать ЛПР на решение"
+        : "✓ Принять и передать в АБС",
+      icon: signing ? Loader2 : isExtended ? ArrowRight : CheckCircle,
+      disabled: signing || !allChecked,
+      onClick: () => doAdvance(
+        isExtended ? "lpr_decision_assignment" : "abs_card_creation",
+        {uskoCheckedBy: currentUser.name, uskoCheckedDate: "2026-03-26"},
+        isExtended
+          ? `Уступка ${asg.id} (${fmtByn(asg.amount || 0)} > 50К) передана ЛПР`
+          : `Комплект принят. Передано УСКО на оформление в АБС`
+      ),
+    };
+    secondaryAction = {
+      label: "Вернуть кредитору",
+      icon: ArrowLeft,
+      onClick: () => setReturnToSupplierModal(true),
+    };
+  }
+  else if (asg.stage === "lpr_decision_assignment") {
+    // ЛПР: одобряет уступку (compliance требование — на каждый ДФ нужно решение)
+    primaryAction = {
+      label: signing ? "Одобрение..." : "✓ Одобрить уступку и подписать ЭЦП",
+      icon: signing ? Loader2 : CheckCircle,
+      disabled: signing,
+      onClick: () => doAdvance("abs_card_creation", {
+        lprApprovedBy: currentUser.name,
+        lprApprovedDate: "2026-03-26",
+      }, `ЛПР одобрил уступку ${asg.id}. Передано УСКО на оформление в АБС`),
+    };
+    secondaryAction = {
+      label: "Отклонить уступку",
+      icon: XCircle,
+      onClick: () => setToast && setToast({msg: "Уступка отклонена ЛПР", type: "warning"}),
+    };
+  }
+  // ═══ Phase 2: АБС + ДФ ═══
+  else if (asg.stage === "abs_card_creation") {
+    primaryAction = {
+      label: signing ? "Сохранение..." : "✓ АБС заполнен — сформировать ДФ",
+      icon: signing ? Loader2 : ArrowRight,
+      disabled: signing,
+      onClick: () => doAdvance("df_generation", {
+        absCardsCreatedBy: currentUser.name,
+        absCardsCreatedDate: "2026-03-26",
+        accountNumber: "3819000" + String(Math.floor(Math.random() * 90000) + 10000),
+      }, `Карточки в АБС созданы. Получен номер счёта. Формирование ДФ`),
+    };
+  }
+  else if (asg.stage === "df_generation") {
     primaryAction = {
       label: generationStep === 4
         ? (signing ? "Передача..." : "📤 Передать подписанту банка")
-        : (generating ? "Генерация ДС..." : "🔄 Сформировать ДС"),
+        : (generating ? "Генерация ДФ..." : "🔄 Сформировать ДФ + акт сверки"),
       icon: generationStep === 4 ? (signing ? Loader2 : ArrowRight) : (generating ? Loader2 : FileText),
       disabled: generationStep === 4 ? false : generating,
       onClick: generationStep === 4
-        ? () => doAdvance("ds_signing_bank", {dsNumber, dsDate: "2026-03-26", docs: {...(asg.docs || {}), supplementaryAgreement: {status: "pending", number: dsNumber}}}, `ДС ${dsNumber} сформировано. Передано подписанту`)
+        ? () => doAdvance("df_signing_bank", {dfNumber: dsNumber, dfDate: "2026-03-26"}, `ДФ ${dsNumber} сформирован. Передан подписанту`)
         : runDsGeneration,
     };
-  } else if (asg.stage === "ds_signing_bank") {
+  }
+  else if (asg.stage === "df_signing_bank") {
     primaryAction = {
-      label: signing ? "Подписание..." : "🔏 Подписать ДС ЭЦП банка",
+      label: signing ? "Подписание..." : "🔏 Подписать ДФ ЭЦП банка",
       icon: signing ? Loader2 : Pen,
       disabled: signing || pin.length !== 4,
-      onClick: () => doAdvance("ds_signing_client", {signedByBank: currentUser.name, signedByBankDate: "2026-03-26", docs: {...(asg.docs || {}), supplementaryAgreement: {...(asg.docs?.supplementaryAgreement || {}), status: "signed_bank", date: "2026-03-26"}}}, "ДС подписано банком. Отправлено клиенту"),
+      onClick: () => doAdvance("df_signing_creditor", {
+        signatures: {
+          ...getAssignmentSignatures(asg),
+          bank: {signed: true, signedBy: currentUser.name, signedAt: "2026-03-26", certNumber: "GS-CERT-2026-XXX"},
+        },
+      }, "ДФ подписан банком. Отправлен кредитору на подпись"),
     };
-  } else if (asg.stage === "ds_signing_client") {
+  }
+  // ═══ Phase 4: Финансирование ═══
+  else if (asg.stage === "payment_authorization") {
     primaryAction = {
-      label: signing ? "Переход..." : "🧪 Mock: клиент подписал",
-      icon: signing ? Loader2 : CheckCircle,
-      onClick: () => doAdvance("payment_approved", {signedByClientDate: "2026-03-26", docs: {...(asg.docs || {}), supplementaryAgreement: {...(asg.docs?.supplementaryAgreement || {}), status: "signed_all", date: "2026-03-26"}}}, "Клиент подписал ДС. Переход на оплату"),
-    };
-  } else if (asg.stage === "payment_approved") {
-    primaryAction = {
-      label: signing ? "Разрешение оплаты..." : "💰 Разрешить оплату в АБС",
+      label: signing ? "Распоряжение..." : "💰 Оформить распоряжение на выдачу",
       icon: signing ? Loader2 : CheckCircle,
       disabled: signing || !paymentVerified,
       onClick: () => setPaymentDangerModal(true),
     };
-  } else if (asg.stage === "awaiting_debtor") {
+  }
+  else if (asg.stage === "payment_disbursed") {
+    // УСКО: подтверждение что АБС выдал финансирование (последний шаг)
+    primaryAction = {
+      label: signing ? "Подтверждение..." : "✅ Финансирование выдано — закрыть задачу",
+      icon: signing ? Loader2 : CheckCircle,
+      disabled: signing,
+      onClick: () => doAdvance("awaiting_debtor_payment", {
+        financing: {
+          ...getAssignmentFinancing(asg),
+          disbursedBy: currentUser.name,
+          disbursedDate: "2026-03-26",
+        },
+        dueDate: (() => {
+          const d = new Date("2026-03-26");
+          d.setDate(d.getDate() + 60);
+          return d.toISOString().slice(0, 10);
+        })(),
+      }, `💰 Финансирование выдано. Ждём возврата от должника`),
+    };
+  }
+  // ═══ Phase 5: Recover ═══
+  else if (asg.stage === "awaiting_debtor_payment") {
     // Credit ops can mark payment received manually (fallback if АБС не засинхронилась)
     primaryAction = {
       label: signing ? "Подтверждение..." : "✓ Должник оплатил (вручную)",
       icon: signing ? Loader2 : CheckCircle,
       disabled: signing,
-      onClick: () => doAdvance("debtor_paid", {debtorPaidDate: "2026-03-26", bankEarned: asg.discount}, `💚 Уступка закрыта. Банк заработал ${fmtByn(asg.discount || 0)}`),
+      onClick: () => doAdvance("assignment_closed", {debtorPaidDate: "2026-03-26", bankEarned: asg.discount}, `💚 Уступка закрыта. Банк заработал ${fmtByn(asg.discount || 0)}`),
     };
     secondaryAction = {
       label: "📧 Напомнить должнику",
@@ -9237,7 +10798,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       label: signing ? "..." : "✓ Средства взысканы судом",
       icon: signing ? Loader2 : CheckCircle,
       disabled: signing,
-      onClick: () => doAdvance("debtor_paid", {debtorPaidDate: "2026-03-26", recoveredThroughCourt: true}, "Средства взысканы через суд. Уступка закрыта"),
+      onClick: () => doAdvance("assignment_closed", {debtorPaidDate: "2026-03-26", recoveredThroughCourt: true}, "Средства взысканы через суд. Уступка закрыта"),
     };
     secondaryAction = {
       label: "Списать как безнадёжная",
@@ -9246,47 +10807,49 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
     };
   }
 
-  // Payment confirmation (triggered from modal)
+  // Payment confirmation (triggered from modal): payment_authorization → payment_disbursed
   const executePaymentApproval = () => {
-    // After payment to client, start awaiting_debtor phase
-    const dueDate = new Date("2026-03-26");
-    dueDate.setDate(dueDate.getDate() + 60); // 60 days default payment term
-    const dueDateStr = dueDate.toISOString().slice(0, 10);
-    doAdvance("paid", {paymentApprovedBy: currentUser.name, paymentApprovedDate: "2026-03-26", paidDate: "2026-03-26", dueDate: dueDateStr}, `💰 Оплата ${fmtByn(asg.toReceive || 0)} в АБС. Теперь ждём возврата от должника до ${dueDateStr}`);
+    doAdvance("payment_disbursed", {
+      financing: {
+        ...getAssignmentFinancing(asg),
+        authorizationDate: "2026-03-26",
+        disbursedDate: "2026-03-26",
+        disbursedBy: currentUser.name,
+      },
+    }, `📤 Распоряжение отправлено в АБС. После выдачи нажмите «Финансирование выдано»`);
   };
 
   return <>
+    {/* ═══ Если у этапа есть определённые задачи — показываем StageTasksPanel ═══ */}
+    {ASSIGNMENT_TASKS[asg.stage] && <StageTasksPanel
+      asg={asg}
+      currentUser={currentUser}
+      onAction={onAction}
+      onTaskComplete={(taskId, newCompleted) => {
+        // Обновить completedTasks без смены stage
+        onAction && onAction(asg.stage, {completedTasks: newCompleted}, null);
+      }}
+      setToast={setToast}/>}
+
     <Card className="p-5 mb-4" style={{background: (stage?.color || B.accent) + "06", borderColor: stage?.color || B.accent, borderWidth: 2}}>
-      {/* ─── Header ─── */}
-      <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b" style={{borderColor: B.border}}>
-        <div className="flex items-start gap-3 min-w-0">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background: "white", border: `1px solid ${(stage?.color || B.accent)}30`}}>
-            {phase?.icon || "📦"}
+      {/* ─── Compact Header (Stepper + StageTasksPanel выше уже показывают этап) ─── */}
+      <div className="flex items-center justify-between gap-3 mb-4 pb-3 border-b" style={{borderColor: B.border}}>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-base">{phase?.icon || "📦"}</span>
+          <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: stage?.color || B.accent}}>
+            Контекст для выполнения задач
           </div>
-          <div className="min-w-0">
-            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: stage?.color || B.accent}}>
-              Ваша задача
-            </div>
-            <div className="text-base font-bold mt-0.5" style={{color: B.t1}}>
-              {stage?.label || asg.stage}
-            </div>
-            <div className="text-[10px] mt-1" style={{color: overdue ? B.red : B.t2}}>
-              {slaText}
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-          <span className="text-[10px] font-bold px-2 py-1 rounded-lg" style={{background: B.accentL, color: B.accent}}>
-            {phase?.icon} {phase?.label}
-          </span>
-          <span className="text-[10px] font-bold px-2 py-1 rounded-lg" style={{background: "#F1F5F9", color: B.t2}}>
-            {actorLabel}
+          <span className="text-[10px]" style={{color: overdue ? B.red : B.t3}}>
+            · {slaText}
           </span>
         </div>
+        <span className="text-[10px] font-bold px-2 py-1 rounded-lg shrink-0" style={{background: "#F1F5F9", color: B.t2}}>
+          {actorLabel}
+        </span>
       </div>
 
       {/* ─── NEW assignment banner (for usko_checking without uskoTakenBy) ─── */}
-      {asg.stage === "usko_checking" && !asg.uskoTakenBy && <div className="flex items-center gap-2 p-2.5 rounded-lg mb-4" style={{background: B.accentL, borderLeft: `3px solid ${B.accent}`}}>
+      {asg.stage === "usko_review" && !asg.uskoTakenBy && <div className="flex items-center gap-2 p-2.5 rounded-lg mb-4" style={{background: B.accentL, borderLeft: `3px solid ${B.accent}`}}>
         <span className="text-base">🆕</span>
         <div>
           <div className="text-xs font-bold" style={{color: B.accent}}>Новая уступка</div>
@@ -9294,12 +10857,31 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
         </div>
       </div>}
 
-      {/* ─── Block: Параметры уступки ─── */}
-      <div className="mb-4">
-        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Параметры уступки
+      {/* ─── Краткая сводка уступки (1 строка) + Collapsible с деталями ─── */}
+      <div className="mb-4 p-3 rounded-lg flex items-center justify-between gap-3 flex-wrap" style={{background: "white", border: `1px solid ${B.border}`}}>
+        <div className="flex items-center gap-3 text-[11px] flex-wrap min-w-0">
+          <span className="font-mono font-bold" style={{color: B.t1}}>{asg.id}</span>
+          <span style={{color: B.t3}}>·</span>
+          <span style={{color: B.t2}}>
+            <strong style={{color: B.t1}}>{creditor?.name || "—"}</strong>
+            <span style={{color: B.t3}}> → </span>
+            <strong style={{color: B.t1}}>{debtor?.name || "—"}</strong>
+          </span>
+          <span style={{color: B.t3}}>·</span>
+          <span className="font-bold mono" style={{color: B.t1}}>{fmtByn(asg.amount || 0)}</span>
+          {asg.toReceive && <span className="font-mono text-[10px]" style={{color: B.green}}>
+            → {fmtByn(asg.toReceive)}
+          </span>}
         </div>
-        <div className="grid grid-cols-4 gap-3 mb-3">
+        <span className="text-[10px] shrink-0" style={{color: overdue ? B.red : B.t3}}>
+          📅 {days} раб.д на этапе
+        </span>
+      </div>
+
+      <Collapsible title="Все параметры уступки" icon="📊"
+        subtitle="ДФ номер, ТТН, дата отгрузки, ставки..."
+        defaultOpen={false}>
+        <div className="grid grid-cols-4 gap-3 mt-2 mb-3">
           <div>
             <div className="text-[10px]" style={{color: B.t3}}>ID · сделка</div>
             <div className="text-xs font-bold mono" style={{color: B.accent}}>{asg.id}</div>
@@ -9341,14 +10923,13 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             <div className="text-xs" style={{color: overdue ? B.red : B.t1}}>{days} раб.д</div>
           </div>
         </div>
-      </div>
+      </Collapsible>
 
-      {/* ─── Block: Документы (5 chips) ─── */}
-      <div className="mb-4">
-        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Документы уступки
-        </div>
-        <div className="flex flex-wrap gap-2">
+      {/* ─── Аккордеон: Документы (свернут по умолчанию) ─── */}
+      <Collapsible title="Документы уступки" icon="📄" count={allDocs.length}
+        subtitle={`ДКП, ТТН, ЭСЧФ, ДФ, уведомление`}
+        defaultOpen={false}>
+        <div className="flex flex-wrap gap-2 mt-2">
           {allDocs.map(d => {
             const cfg = docStatusColor[d.status] || docStatusColor.pending;
             return <button key={d.key} onClick={() => openDoc(d.key)}
@@ -9361,12 +10942,180 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             </button>;
           })}
         </div>
-      </div>
+      </Collapsible>
 
-      {/* ─── Stage-specific block ─── */}
+      {/* ─── Аккордеон: Подписи (свернут по умолчанию) ─── */}
+      {(() => {
+        const sigs = getAssignmentSignatures(asg);
+        if (!sigs) return null;
+        const sigCount = ["bank", "creditor_df", "creditor_act", "debtor_act", "debtor_notification"]
+          .filter(k => sigs[k]?.signed).length;
+        return <Collapsible title="Подписи ЭЦП" icon="✍" count={`${sigCount}/5`}
+          subtitle="Цепочка подписания договора факторинга"
+          color={sigCount === 5 ? "#059669" : "#0F172A"}
+          defaultOpen={false}>
+          <div className="mt-2">
+            <SignaturesProgress asg={asg}/>
+          </div>
+        </Collapsible>;
+      })()}
+
+      {/* ─── Аккордеон: История (свернут по умолчанию) ─── */}
+      {asg.history && asg.history.length > 0 && <Collapsible title="История" icon="📜" count={asg.history.length}
+        subtitle="Все действия с уступкой по хронологии"
+        defaultOpen={false}>
+        <div className="space-y-1.5 mt-2">
+          {asg.history.slice().reverse().map((h, idx) => <div key={idx}
+            className="flex items-start gap-2 text-[11px] p-2 rounded" style={{background: "#F8FAFC"}}>
+            <div className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{background: "#1E40AF"}}/>
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold" style={{color: "#0F172A"}}>{h.action}</div>
+              <div className="text-[10px]" style={{color: "#475569"}}>
+                {h.user} {h.userRole && `· ${h.userRole}`} · {h.date}
+              </div>
+              {h.comment && <div className="text-[10px] mt-1 italic" style={{color: "#475569"}}>"{h.comment}"</div>}
+            </div>
+          </div>)}
+        </div>
+      </Collapsible>}
+
+      {/* ─── Stage-specific block — обёрнут в аккордеон «Контекст этапа» ─── */}
+      {/* Свёрнут по умолчанию когда есть чек-лист задач (StageTasksPanel выше). */}
+      <Collapsible title="Контекст этапа" icon="ℹ️"
+        subtitle="Детали и параметры для проверки перед выполнением задач"
+        defaultOpen={!ASSIGNMENT_TASKS[asg.stage]}>
+      <div className="mt-2">
+
+      {/* debtor_scoring: analyst sets debtor limit (Phase 0) */}
+      {asg.stage === "debtor_scoring" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Скоринг должника + установка лимита
+        </div>
+        <div className="p-4 rounded-xl mb-3" style={{background: "#FAF5FF", borderLeft: `3px solid #A855F7`}}>
+          <div className="text-xs font-bold mb-2" style={{color: "#7C3AED"}}>📊 Шаг 0 факторингового конвейера</div>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            <strong>{debtor?.name}</strong> прошёл идентификацию по приглашению от <strong>{creditor?.name}</strong>.
+            Проведите скоринг должника и определите лимит (объём), на который он может покупать.
+          </div>
+        </div>
+        {debtor && <div className="grid grid-cols-3 gap-3 mb-3">
+          <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>Скоринг</div>
+            <div className="text-lg font-black" style={{color: B.t1}}>{debtor.scoringClass || "—"}</div>
+            <div className="text-[10px]" style={{color: B.t3}}>{debtor.scoring?.total || "—"}/200 баллов</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>БКИ</div>
+            <div className="text-xs font-bold" style={{color: B.green}}>✓ Чисто</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>Легат</div>
+            <div className="text-xs font-bold" style={{color: B.green}}>✓ Без проблем</div>
+          </div>
+        </div>}
+      </div>}
+
+      {/* lpr_decision_assignment: LPR decides on assignment (>50K) */}
+      {asg.stage === "lpr_decision_assignment" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Решение ЛПР по уступке (Compliance, ст. 121 БК)
+        </div>
+        <div className="p-4 rounded-xl mb-3" style={{background: "#EEF2FF", borderLeft: `3px solid #6366F1`}}>
+          <div className="text-xs font-bold mb-2" style={{color: "#6366F1"}}>⚠ Уступка > 50К — требуется решение ЛПР</div>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            На каждый договор факторинга нужно решение уполномоченного лица банка (compliance-требование от Лены).
+            УСКО проверил документы. Ваше решение: одобрить уступку или отклонить.
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>Сумма уступки</div>
+            <div className="text-lg font-black mono" style={{color: B.t1}}>{fmtByn(asg.amount || 0)}</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>Лимит должника</div>
+            <div className="text-lg font-black mono" style={{color: B.green}}>
+              {(() => {
+                const lim = debtor ? getDebtorLimit(debtor) : null;
+                return lim ? fmtByn(lim.available) : "—";
+              })()}
+            </div>
+            <div className="text-[10px]" style={{color: B.t3}}>доступно</div>
+          </div>
+        </div>
+      </div>}
+
+      {/* abs_card_creation: USKO fills ABS cards */}
+      {asg.stage === "abs_card_creation" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Заполнение карточек в АБС банка
+        </div>
+        <div className="p-3 rounded-xl mb-3" style={{background: "#FFF7ED", borderLeft: `3px solid ${B.orange}`}}>
+          <div className="text-xs font-bold mb-1" style={{color: B.orange}}>📋 Шаг УСКО: ручное заполнение АБС</div>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            Заполните 3 карточки в АБС, получите номер счёта 3819 и продолжите. В прототипе — нажатие кнопки симулирует это.
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          {[
+            {label: "Карточка кредитора", desc: creditor?.name + " · УНП " + (creditor?.unp || "—")},
+            {label: "Карточка должника", desc: debtor?.name + " · УНП " + (debtor?.unp || "—")},
+            {label: "Карточка договора факторинга", desc: `Сумма ${fmtByn(asg.amount || 0)} · ${asg.termDays || 60} дней`},
+          ].map((card, i) => <div key={i} className="flex items-center gap-2 p-2.5 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+            <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold" style={{background: B.orange, color: "white"}}>
+              {i + 1}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold" style={{color: B.t1}}>{card.label}</div>
+              <div className="text-[10px]" style={{color: B.t3}}>{card.desc}</div>
+            </div>
+            <span className="text-[10px] px-2 py-0.5 rounded-full" style={{background: B.yellowL, color: B.yellow}}>⏳ Заполните в АБС</span>
+          </div>)}
+        </div>
+        <div className="text-[10px] mt-2 italic flex items-start gap-1" style={{color: B.t3}}>
+          <Info size={10} className="shrink-0 mt-0.5"/>
+          После заполнения АБС автоматически выдаст номер транзитного счёта (3819...). Затем нажмите «АБС заполнен» для перехода к формированию ДФ.
+        </div>
+      </div>}
+
+      {/* payment_disbursed: USKO confirms disbursement */}
+      {asg.stage === "payment_disbursed" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Подтверждение выдачи финансирования
+        </div>
+
+        {/* Цепочка подписей — все 5 уже на месте */}
+        <div className="mb-3">
+          <SignaturesProgress asg={asg}/>
+        </div>
+
+        <div className="p-4 rounded-xl mb-3" style={{background: "#F0FDF4", borderLeft: `3px solid ${B.green}`}}>
+          <div className="text-xs font-bold mb-2" style={{color: B.green}}>📤 Распоряжение в АБС отправлено</div>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            Распоряжение на выдачу финансирования {fmtByn(asg.toReceive || 0)} направлено в АБС.
+            Когда деньги поступят на счёт кредитора — нажмите кнопку «Финансирование выдано».
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>Получатель</div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>{creditor?.name}</div>
+            <div className="text-[10px] mono" style={{color: B.t3}}>сч. {getAssignmentFinancing(asg)?.accountNumber || asg.accountNumber || "3819..."}</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{background: B.greenL, border: `1px solid ${B.green}30`}}>
+            <div className="text-[10px]" style={{color: B.t3}}>К выплате</div>
+            <div className="text-base font-black mono" style={{color: B.green}}>{fmtByn(asg.toReceive || 0)}</div>
+            <div className="text-[10px]" style={{color: B.t3}}>удержан дисконт {fmtByn(asg.discount || 0)}</div>
+          </div>
+        </div>
+        <div className="text-[10px] mt-2 italic flex items-start gap-1" style={{color: B.t3}}>
+          <Info size={10} className="shrink-0 mt-0.5"/>
+          После нажатия «Финансирование выдано» уступка перейдёт в режим ожидания платежа от должника (60 дней).
+        </div>
+      </div>}
 
       {/* usko_checking: checklist */}
-      {asg.stage === "usko_checking" && <div className="mb-4">
+      {asg.stage === "usko_review" && <div className="mb-4">
         <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
           Проверка комплекта документов
         </div>
@@ -9382,23 +11131,39 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             <span className="text-[11px]" style={{color: B.t1}}>{item.label}</span>
           </label>)}
         </div>
+        {/* Лимит должника в контексте проверки */}
+        {debtor && (() => {
+          const lim = getDebtorLimit(debtor);
+          if (!lim) return null;
+          const isExceeding = (asg.amount || 0) > lim.available;
+          return <div className="mt-2 p-2.5 rounded-lg" style={{background: isExceeding ? B.redL : B.greenL}}>
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span style={{color: B.t2}}>Сумма уступки vs доступный лимит должника:</span>
+              <span className="font-bold mono" style={{color: isExceeding ? B.red : B.green}}>
+                {fmtByn(asg.amount || 0)} / {fmtByn(lim.available)}
+                {isExceeding ? " ⚠ ПРЕВЫШЕНИЕ" : " ✓"}
+              </span>
+            </div>
+          </div>;
+        })()}
         <div className="text-[10px] mt-2 italic" style={{color: B.t3}}>
           <Info size={10} className="inline mr-1"/>
           Отметьте все проверенные документы, чтобы активировать кнопку приёмки
+          {(asg.amount || 0) > 50000 && <span style={{color: B.orange}}>. Сумма &gt; 50К → передача ЛПР</span>}
         </div>
       </div>}
 
       {/* ds_preparing: DS generation */}
-      {asg.stage === "ds_preparing" && <div className="mb-4">
+      {asg.stage === "df_generation" && <div className="mb-4">
         <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Формирование дополнительного соглашения (ДС)
+          Формирование договора факторинга (ДФ) + акта сверки
         </div>
 
-        {/* Summary of what DS will contain — with auto-calc explanation */}
+        {/* Summary of what ДФ will contain — with auto-calc explanation */}
         <div className="p-3 rounded-xl mb-3" style={{background: B.accentL + "40", borderLeft: `3px solid ${B.accent}`}}>
           <div className="flex items-center justify-between">
             <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.accent}}>
-              Данные в ДС (автоматический расчёт)
+              Данные ДФ на 1 страничку (автоматический расчёт)
             </div>
             <span className="text-[9px] px-1.5 py-0.5 rounded" style={{background: "white", color: B.accent}}>
               🧮 Калькулятор
@@ -9475,39 +11240,67 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       </div>}
 
       {/* ds_signing_bank: PIN + return link */}
-      {asg.stage === "ds_signing_bank" && <div className="mb-4">
+      {asg.stage === "df_signing_bank" && <div className="mb-4">
         <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Подписание ДС ЭЦП банка
+          Подписание ДФ ЭЦП банка
         </div>
 
-        <div className="p-4 rounded-xl mb-3" style={{background: "#ECFEFF", borderLeft: `3px solid #06B6D4`}}>
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{background: "white"}}>
-              <FileText size={20} style={{color: "#06B6D4"}}/>
+        {/* Цепочка подписей */}
+        <div className="mb-3">
+          <SignaturesProgress asg={asg}/>
+        </div>
+
+        {/* Both documents to sign — DF + akt sverki */}
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="p-3 rounded-xl" style={{background: "#ECFEFF", borderLeft: `3px solid #06B6D4`}}>
+            <div className="flex items-center gap-2 mb-1.5">
+              <FileText size={16} style={{color: "#06B6D4"}}/>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: "#06B6D4"}}>Документ 1 из 2</span>
             </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs font-bold" style={{color: "#06B6D4"}}>ДС готово к подписи</div>
-              <div className="text-sm font-bold mt-0.5" style={{color: B.t1}}>
-                Допсоглашение {asg.dsNumber && <span className="mono">№{asg.dsNumber}</span>}
-              </div>
-              <div className="text-[10px] mt-1" style={{color: B.t2}}>
-                Клиент: <strong>{creditor?.name}</strong> · Должник: <strong>{debtor?.name}</strong> · К выплате: <strong className="mono">{fmtByn(asg.toReceive || 0)}</strong>
-              </div>
-              <div className="flex items-center gap-2 mt-2">
-                <button onClick={() => setShowDsPreview(true)}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
-                  <Eye size={11}/> Открыть ДС
-                </button>
-                <span style={{color: B.t3}}>·</span>
-                <button onClick={() => setToast && setToast({msg: "PDF скачан (mock)", type: "success"})}
-                  className="text-[11px] font-semibold flex items-center gap-1 hover:underline" style={{color: B.accent}}>
-                  <Download size={11}/> Скачать PDF
-                </button>
-              </div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>Договор факторинга</div>
+            <div className="text-[10px] mono mt-0.5" style={{color: B.t2}}>
+              {asg.dfNumber || asg.dsNumber || `ДФ-${(asg.id || "").replace("ASG-", "")}`}
+            </div>
+            <button onClick={() => setShowDsPreview(true)}
+              className="text-[10px] font-semibold mt-1.5 flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+              <Eye size={10}/> Открыть превью
+            </button>
+          </div>
+          <div className="p-3 rounded-xl" style={{background: "#FAF5FF", borderLeft: `3px solid #A855F7`}}>
+            <div className="flex items-center gap-2 mb-1.5">
+              <FileText size={16} style={{color: "#A855F7"}}/>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: "#A855F7"}}>Документ 2 из 2</span>
+            </div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>Акт сверки</div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t2}}>
+              {creditor?.name} ↔ {debtor?.name}
+            </div>
+            <button onClick={() => setToast && setToast({msg: "Превью акта сверки (в разработке)", type: "info"})}
+              className="text-[10px] font-semibold mt-1.5 flex items-center gap-1 hover:underline" style={{color: B.accent}}>
+              <Eye size={10}/> Открыть превью
+            </button>
+          </div>
+        </div>
+
+        {/* Summary row */}
+        <div className="p-3 rounded-lg mb-3" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+          <div className="grid grid-cols-3 gap-3 text-[11px]">
+            <div>
+              <div className="text-[9px]" style={{color: B.t3}}>Клиент</div>
+              <div className="font-semibold" style={{color: B.t1}}>{creditor?.name}</div>
+            </div>
+            <div>
+              <div className="text-[9px]" style={{color: B.t3}}>Должник</div>
+              <div className="font-semibold" style={{color: B.t1}}>{debtor?.name}</div>
+            </div>
+            <div>
+              <div className="text-[9px]" style={{color: B.t3}}>К выплате</div>
+              <div className="font-bold mono" style={{color: B.green}}>{fmtByn(asg.toReceive || 0)}</div>
             </div>
           </div>
         </div>
 
+        {/* PIN input for ECP */}
         <div className="mb-3">
           <label className="text-[10px] font-semibold block mb-1" style={{color: B.t3}}>
             PIN-код ЭЦП банка <span style={{color: B.red}}>*</span>
@@ -9517,7 +11310,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             className="w-full px-3 py-2 text-lg rounded-lg border border-slate-200 mono text-center"
             style={{color: B.t1, letterSpacing: "0.5em"}}/>
           <div className="text-[9px] mt-1" style={{color: B.t3}}>
-            4 цифры. Демо-режим: любые 4 цифры подойдут.
+            Подпись применяется ОБОИМ документам сразу (ДФ + акт). 4 цифры. Демо-режим: любые подойдут.
           </div>
         </div>
 
@@ -9530,29 +11323,71 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
       </div>}
 
       {/* ds_signing_client: waiting */}
-      {asg.stage === "ds_signing_client" && <div className="mb-4">
+      {asg.stage === "df_signing_creditor" && <div className="mb-4">
         <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Ожидание подписи клиента
+          Ожидание подписи кредитора (ДФ + акт сверки)
         </div>
-        <div className="p-4 rounded-xl mb-3" style={{background: "#F0F9FF", borderLeft: `3px solid #0891B2`}}>
+
+        {/* Цепочка подписей */}
+        <div className="mb-3">
+          <SignaturesProgress asg={asg}/>
+        </div>
+
+        <div className="p-3 rounded-xl mb-3" style={{background: "#F0F9FF", borderLeft: `3px solid #0891B2`}}>
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 text-2xl" style={{background: "white"}}>
               ⏳
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-xs font-bold" style={{color: "#0891B2"}}>Клиент подписывает ДС</div>
+              <div className="text-xs font-bold" style={{color: "#0891B2"}}>Кредитор подписывает ДФ + акт сверки</div>
               <div className="text-[11px] mt-1" style={{color: B.t2}}>
-                <strong>{creditor?.name}</strong> должен подписать ДС ЭЦП в своём кабинете.
+                <strong>{creditor?.name}</strong> должен подписать оба документа одновременно ЭЦП в своём личном кабинете.
               </div>
-              {asg.signedByBankDate && <div className="text-[10px] mt-2" style={{color: B.t3}}>
-                Банк подписал: {asg.signedByBankDate} · {asg.signedByBank || "—"}
-              </div>}
             </div>
           </div>
         </div>
+
+        {/* 2 документа: ДФ (банк подписал) + акт сверки (ждёт кредитора) */}
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="p-3 rounded-lg" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
+            <div className="flex items-center gap-2 mb-1">
+              <FileText size={14} style={{color: B.green}}/>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.green}}>ДФ — подписан банком ✓</span>
+            </div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>
+              {asg.dfNumber || asg.dsNumber || `ДФ-${(asg.id || "").replace("ASG-", "")}`}
+            </div>
+            {(() => {
+              const sigs = getAssignmentSignatures(asg);
+              return sigs?.bank?.signedAt ? <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                Банк: {sigs.bank.signedAt}
+              </div> : null;
+            })()}
+            <div className="text-[10px] mt-1.5" style={{color: B.t3}}>
+              Ждёт: ЭЦП кредитора
+            </div>
+          </div>
+          <div className="p-3 rounded-lg" style={{background: B.yellowL, borderLeft: `3px solid ${B.yellow}`}}>
+            <div className="flex items-center gap-2 mb-1">
+              <FileText size={14} style={{color: B.yellow}}/>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.yellow}}>Акт сверки</span>
+            </div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>
+              {creditor?.name} ↔ {debtor?.name}
+            </div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+              Сумма: {fmtByn(asg.amount || 0)}
+            </div>
+            <div className="text-[10px] mt-1.5" style={{color: B.t3}}>
+              Ждёт: ЭЦП кредитора
+            </div>
+          </div>
+        </div>
+
+        {/* Reminders */}
         <div className="flex gap-2 mb-2">
           <Btn size="sm" variant="ghost" icon={Mail} className="flex-1"
-            onClick={() => setToast && setToast({msg: "Напоминание отправлено клиенту на email", type: "info"})}>
+            onClick={() => setToast && setToast({msg: "Напоминание отправлено кредитору на email", type: "info"})}>
             Напомнить на email
           </Btn>
           <Btn size="sm" variant="ghost" icon={Bell} className="flex-1"
@@ -9560,20 +11395,127 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
             SMS-напоминание
           </Btn>
         </div>
-        <div className="text-[10px] italic flex items-center gap-1" style={{color: B.t3}}>
-          <Info size={10}/>Клиент подписывает в своём кабинете. Ниже — mock-кнопка для демо.
+
+        {/* Mock-кнопка для demo */}
+        <div className="text-[10px] italic flex items-center gap-1 mb-2" style={{color: B.t3}}>
+          <Info size={10}/>В реальности кредитор подписывает в своём кабинете. Для демо — mock-кнопка ниже.
         </div>
+        <Btn size="sm" variant="ghost" icon={CheckCircle} className="w-full"
+          onClick={() => doAdvance("debtor_signing", {
+            signatures: {
+              ...getAssignmentSignatures(asg),
+              creditor_df:  {signed: true, signedAt: "2026-03-26 14:00"},
+              creditor_act: {signed: true, signedAt: "2026-03-26 14:00"},
+            },
+          }, `Кредитор подписал ДФ + акт. Передано должнику`)}>
+          🧪 Mock: кредитор подписал оба документа
+        </Btn>
       </div>}
 
-      {/* payment_approved: checkbox + warning */}
-      {asg.stage === "payment_approved" && <div className="mb-4">
+      {/* debtor_signing: ждём должника (акт сверки + уведомление) */}
+      {asg.stage === "debtor_signing" && <div className="mb-4">
         <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
-          Разрешение на оплату в АБС
+          Ожидание подписи должника (акт + уведомление)
         </div>
+
+        {/* Цепочка подписей */}
+        <div className="mb-3">
+          <SignaturesProgress asg={asg}/>
+        </div>
+
+        <div className="p-3 rounded-xl mb-3" style={{background: "#FAF5FF", borderLeft: `3px solid #A855F7`}}>
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 text-2xl" style={{background: "white"}}>
+              🚚
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-bold" style={{color: "#A855F7"}}>Должник подписывает акт сверки + уведомление об уступке</div>
+              <div className="text-[11px] mt-1" style={{color: B.t2}}>
+                <strong>{debtor?.name}</strong> должен подписать оба документа в своём личном кабинете. После подписи — финансирование выдаётся кредитору.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 2 документа должника */}
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="p-3 rounded-lg" style={{background: B.yellowL, borderLeft: `3px solid ${B.yellow}`}}>
+            <div className="flex items-center gap-2 mb-1">
+              <FileText size={14} style={{color: B.yellow}}/>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.yellow}}>Акт сверки</span>
+            </div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>
+              {creditor?.name} ↔ {debtor?.name}
+            </div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+              Подтверждение задолженности
+            </div>
+            <div className="text-[10px] mt-1.5" style={{color: B.t3}}>
+              Ждёт: ЭЦП должника
+            </div>
+          </div>
+          <div className="p-3 rounded-lg" style={{background: B.yellowL, borderLeft: `3px solid ${B.yellow}`}}>
+            <div className="flex items-center gap-2 mb-1">
+              <FileText size={14} style={{color: B.yellow}}/>
+              <span className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.yellow}}>Уведомление об уступке</span>
+            </div>
+            <div className="text-xs font-bold" style={{color: B.t1}}>
+              О передаче прав требования
+            </div>
+            <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+              Должник платит банку, не кредитору
+            </div>
+            <div className="text-[10px] mt-1.5" style={{color: B.t3}}>
+              Ждёт: ознакомление + ЭЦП
+            </div>
+          </div>
+        </div>
+
+        {/* Reminders */}
+        <div className="flex gap-2 mb-2">
+          <Btn size="sm" variant="ghost" icon={Mail} className="flex-1"
+            onClick={() => setToast && setToast({msg: "Напоминание отправлено должнику на email", type: "info"})}>
+            Напомнить на email
+          </Btn>
+          <Btn size="sm" variant="ghost" icon={Bell} className="flex-1"
+            onClick={() => setToast && setToast({msg: "SMS-напоминание отправлено", type: "info"})}>
+            SMS-напоминание
+          </Btn>
+        </div>
+
+        <div className="text-[10px] italic flex items-center gap-1 mb-2" style={{color: B.t3}}>
+          <Info size={10}/>В реальности должник подписывает в своём кабинете. Для демо — mock-кнопка ниже.
+        </div>
+        <Btn size="sm" variant="ghost" icon={CheckCircle} className="w-full"
+          onClick={() => doAdvance("payment_authorization", {
+            signatures: {
+              ...getAssignmentSignatures(asg),
+              debtor_act:          {signed: true, signedAt: "2026-03-26 16:00"},
+              debtor_notification: {signed: true, signedAt: "2026-03-26 16:00"},
+            },
+          }, `Должник подписал акт + уведомление. УСКО оформляет распоряжение`)}>
+          🧪 Mock: должник подписал акт + уведомление
+        </Btn>
+      </div>}
+
+      {/* payment_authorization: УСКО оформляет распоряжение (после всех подписей) */}
+      {asg.stage === "payment_authorization" && <div className="mb-4">
+        <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+          Оформление распоряжения на выдачу финансирования
+        </div>
+
+        {/* Все подписи собраны — показываем cепочку */}
+        <div className="mb-3">
+          <SignaturesProgress asg={asg}/>
+        </div>
+
         <div className="p-4 rounded-xl mb-3" style={{background: B.greenL, borderLeft: `3px solid ${B.green}`}}>
+          <div className="text-[10px] font-bold uppercase tracking-wider mb-1.5" style={{color: B.green}}>
+            ✓ Все подписи собраны — можно выдавать финансирование
+          </div>
           <div className="grid grid-cols-3 gap-3 text-[11px]">
             <div><span style={{color: B.t3}}>Получатель:</span> <strong style={{color: B.t1}}>{creditor?.name}</strong></div>
-            <div><span style={{color: B.t3}}>Счёт:</span> <strong className="mono" style={{color: B.t1}}>{creditor?.accountNumber || "—"}</strong></div>
+            <div><span style={{color: B.t3}}>Счёт:</span> <strong className="mono" style={{color: B.t1}}>{getAssignmentFinancing(asg)?.accountNumber || asg.accountNumber || "3819..."}</strong></div>
             <div><span style={{color: B.t3}}>К выплате:</span> <strong className="mono text-sm" style={{color: B.green}}>{fmtByn(asg.toReceive || 0)}</strong></div>
           </div>
         </div>
@@ -9593,17 +11535,27 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
         </div>
       </div>}
 
-      {/* ─── Footer: primary action ─── */}
-      <div className="pt-3 border-t" style={{borderColor: B.border}}>
-        {primaryAction && <Btn size="lg" icon={primaryAction.icon}
-          disabled={primaryAction.disabled != null ? primaryAction.disabled : signing}
-          className="w-full"
-          onClick={primaryAction.onClick}>
-          {primaryAction.label}
-        </Btn>}
+      </div>
+      </Collapsible>
+
+      {/* ─── Footer: primary action — крупная sticky-like кнопка ─── */}
+      <div className="pt-4 mt-2 border-t-2" style={{borderColor: stage?.color ? stage.color + "30" : B.border}}>
+        {primaryAction && <>
+          <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-2" style={{color: stage?.color || B.accent}}>
+            <span>👉 Главное действие</span>
+            <span className="text-[9px] font-semibold" style={{color: B.t3}}>· Нажмите чтобы продвинуть уступку</span>
+          </div>
+          <Btn size="lg" icon={primaryAction.icon}
+            disabled={primaryAction.disabled != null ? primaryAction.disabled : signing}
+            className="w-full"
+            style={{background: stage?.color || B.accent}}
+            onClick={primaryAction.onClick}>
+            {primaryAction.label}
+          </Btn>
+        </>}
 
         {/* Secondary action: "Return to supplier" for usko_checking */}
-        {asg.stage === "usko_checking" && <div className="flex items-center justify-center mt-3">
+        {asg.stage === "usko_review" && <div className="flex items-center justify-center mt-3">
           <button onClick={() => {setSupplierIssues([]); setSupplierComment(""); setReturnToSupplierModal(true);}}
             className="text-[11px] font-semibold hover:underline flex items-center gap-1" style={{color: B.red}}>
             ↩ Вернуть поставщику на доработку
@@ -9656,7 +11608,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
           <Btn variant="danger" icon={XCircle} className="flex-1"
             disabled={supplierIssues.length === 0 || !supplierComment.trim()}
             onClick={() => {
-              onAction && onAction("returned_to_supplier", {_returnIssues: supplierIssues, _returnComment: supplierComment}, "Возвращено поставщику на доработку");
+              onAction && onAction("returned_to_creditor", {_returnIssues: supplierIssues, _returnComment: supplierComment}, "Возвращено поставщику на доработку");
               setReturnToSupplierModal(false);
             }}>
             Вернуть
@@ -9699,7 +11651,7 @@ function AssignmentTaskForm({asg, currentUser, onAction, setToast}) {
           <Btn variant="danger" icon={XCircle} className="flex-1"
             disabled={returnToUskoIssues.length === 0 || !returnToUskoComment.trim()}
             onClick={() => {
-              onAction && onAction("ds_preparing", {_returnIssues: returnToUskoIssues, _returnComment: returnToUskoComment}, "Возвращено УСКО на доработку ДС");
+              onAction && onAction("df_generation", {_returnIssues: returnToUskoIssues, _returnComment: returnToUskoComment}, "Возвращено УСКО на доработку ДС");
               setReturnToUskoModal(false);
             }}>
             Вернуть
@@ -9798,7 +11750,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
     if (stage?.actor === "debtor" || stage?.actor === "supplier") {
       return <ClientActivityCard asg={asg} setToast={setToast}/>;
     }
-    if (asg.stage === "paid") {
+    if (asg.stage === "payment_disbursed") {
       return <Card className="p-5 mb-5" style={{background:B.greenL, borderColor:B.green+"40"}}>
         <div className="flex items-start gap-3">
           <CheckCircle size={22} style={{color:B.green}} className="shrink-0 mt-0.5"/>
@@ -9809,7 +11761,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
         </div>
       </Card>;
     }
-    if (asg.stage === "debtor_paid") {
+    if (asg.stage === "assignment_closed") {
       const economics = calculateAssignmentEconomics({amount: asg.amount, rate: 25, termDays: DEFAULT_ASSIGNMENT_TERM_DAYS});
       return <Card className="p-5 mb-5" style={{background:B.greenL, borderColor:B.green+"40", borderWidth: 1}}>
         <div className="flex items-start gap-3">
@@ -9845,9 +11797,9 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
   const roleInfo = ROLE_ACCESS[currentUser.role];
 
   // ─── usko_checking: проверка комплекта ───
-  if (asg.stage === "usko_checking") {
+  if (asg.stage === "usko_review") {
     const submitRequestDocs = () => {
-      onAction("returned_to_supplier", {
+      onAction("returned_to_creditor", {
         returnReason: {
           issues: docsIssues,
           comment: docsComment,
@@ -9890,7 +11842,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
         </div>
         <div className="space-y-2">
           <Btn size="md" icon={signing?Loader2:Check} disabled={signing} className="w-full"
-            onClick={()=>doAdvance("ds_preparing", {}, "Комплект проверен. Переходим к формированию ДС")}>
+            onClick={()=>doAdvance("df_generation", {}, "Комплект проверен. Переходим к формированию ДС")}>
             {signing?"Обработка...":"✓ КОМПЛЕКТ ПОЛНЫЙ, ФОРМИРОВАТЬ ДС"}
           </Btn>
           <Btn size="sm" variant="danger" icon={AlertTriangle} className="w-full"
@@ -9932,7 +11884,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
   }
 
   // ─── ds_preparing ───
-  if (asg.stage === "ds_preparing") {
+  if (asg.stage === "df_generation") {
     return <Card className="p-5 mb-5" style={{background:roleInfo.color+"08", borderColor:roleInfo.color, borderWidth:2}}>
       <div className="flex items-start gap-3 mb-4">
         <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 text-xl" style={{background:"white"}}>🎯</div>
@@ -9943,16 +11895,16 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
         </div>
       </div>
       <Btn size="md" icon={signing?Loader2:FileText} disabled={signing} className="w-full"
-        onClick={()=>doAdvance("ds_signing_bank", {docs:{...asg.docs, supplementaryAgreement:{status:"pending_bank"}}}, "ДС сформировано. Передано подписанту")}>
+        onClick={()=>doAdvance("df_signing_bank", {docs:{...asg.docs, supplementaryAgreement:{status:"pending_bank"}}}, "ДС сформировано. Передано подписанту")}>
         {signing?"Формирование...":"📄 СФОРМИРОВАТЬ ДС ПО ШАБЛОНУ"}
       </Btn>
     </Card>;
   }
 
   // ─── ds_signing_bank ───
-  if (asg.stage === "ds_signing_bank") {
+  if (asg.stage === "df_signing_bank") {
     const submitReturnDs = () => {
-      onAction("ds_preparing", {
+      onAction("df_generation", {
         _returnDsIssues: returnDsIssues,
         _returnDsComment: returnDsComment,
       }, "ДС возвращено УСКО на доработку");
@@ -9971,7 +11923,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
         <div className="space-y-2">
           <Btn size="sm" variant="secondary" icon={Eye} className="w-full" onClick={()=>setToast({msg:"ДС открыто для просмотра",type:"info"})}>Просмотреть ДС</Btn>
           <Btn size="md" icon={signing?Loader2:Pen} disabled={signing} className="w-full"
-            onClick={()=>doAdvance("ds_signing_client", {docs:{...asg.docs, supplementaryAgreement:{status:"signed_bank"}}}, "ДС подписано банком. Отправлено клиенту")}>
+            onClick={()=>doAdvance("df_signing_creditor", {docs:{...asg.docs, supplementaryAgreement:{status:"signed_bank"}}}, "ДС подписано банком. Отправлено клиенту")}>
             {signing?"Подписание...":"🔏 ПОДПИСАТЬ ДС ЭЦП БАНКА"}
           </Btn>
           <Btn size="sm" variant="danger" icon={XCircle} className="w-full" onClick={()=>{setReturnDsIssues([]);setReturnDsComment("");setReturnDsModal(true)}}>Вернуть УСКО на доработку</Btn>
@@ -10009,7 +11961,7 @@ function AssignmentActionBlock({asg, currentUser, onAction, setToast}) {
   }
 
   // ─── payment_approved ───
-  if (asg.stage === "payment_approved") {
+  if (asg.stage === "payment_authorization") {
     const discount = Math.round(asg.amount * 0.062);
     const toReceive = asg.amount - discount;
     return <Card className="p-5 mb-5" style={{background:roleInfo.color+"08", borderColor:roleInfo.color, borderWidth:2}}>
@@ -10055,7 +12007,7 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
   // automatically mark it as taken. Removes need for a separate "Take in work" button.
   useEffect(() => {
     if (!setAssignmentsData) return;
-    if (asg.stage !== "usko_checking") return;
+    if (asg.stage !== "usko_review") return;
     if (asg.uskoTakenBy) return;
     if (currentUser.role !== "usko_prepare" && currentUser.role !== "admin") return;
     setAssignmentsData(prev => prev.map(a => a.id === asg.id
@@ -10065,14 +12017,21 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
 
   const handleAction = (nextStage, extraData={}, msg) => {
     const ACTION_MAP = {
-      ds_preparing: "checked_ok",
-      ds_signing_bank: "ds_generated",
-      ds_signing_client: "ds_signed_bank",
-      payment_approved: "ds_signed_client",
-      paid: "payment_approved",
-      returned_to_supplier: "returned_to_supplier",
+      df_generation: "checked_ok",
+      df_signing_bank: "df_generated",
+      df_signing_creditor: "df_signed_bank",
+      debtor_signing: "df_signed_creditor",
+      payment_authorization: "debtor_signed",
+      payment_disbursed: "payment_authorized",
+      awaiting_debtor_payment: "payment_disbursed",
+      assignment_closed: "debtor_repaid",
+      returned_to_creditor: "returned_to_creditor",
     };
-    const newHistoryItem = {
+
+    // Если nextStage === текущий stage → это task-progress update (не смена этапа)
+    const isSameStage = nextStage === asg.stage;
+
+    const newHistoryItem = isSameStage ? null : {
       action: ACTION_MAP[nextStage] || `moved_to_${nextStage}`,
       user: currentUser.name,
       userRole: currentUser.role,
@@ -10085,12 +12044,14 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
     delete extraData._returnDsIssues;
     delete extraData._returnDsComment;
 
-    setAssignmentsData(prev => prev.map(a => a.id===asg.id
-      ? {...a, stage: nextStage, stageStartDate:"2026-03-26", history:[...(a.history||[]), newHistoryItem], ...extraData}
+    setAssignmentsData(prev => prev.map(a => a.id === asg.id
+      ? isSameStage
+        ? {...a, ...extraData} // только обновить completedTasks/etc
+        : {...a, stage: nextStage, stageStartDate: "2026-03-26", history: [...(a.history || []), newHistoryItem], ...extraData}
       : a
     ));
-    setToast({msg: msg||"Этап обновлён", type:"success"});
-    onBack();
+    if (msg) setToast({msg, type: "success"});
+    if (!isSameStage) onBack(); // закрыть экран только при смене этапа
   };
 
   return <div>
@@ -10111,18 +12072,21 @@ function AssignmentDetailView({asg, currentUser, assignmentsData, setAssignments
         <span className="px-2 py-1 rounded-lg text-[10px] font-bold" style={{background:B.accentL, color:B.accent}}>{fmtByn(asg.amount)}</span>
       </div>}/>
 
+    {/* Stepper: где я в процессе (контекст «3 из 16 этапов») */}
+    <AssignmentStepper asg={asg}/>
+
     {/* Unified task form — handles all states: actor, non-actor monitoring, paid, debtor_paid */}
     <AssignmentTaskForm asg={asg} currentUser={currentUser} onAction={handleAction} setToast={setToast}/>
 
     {/* Client reminder — when waiting for supplier/debtor action */}
-    {isAssignmentWaitingClient(asg) && asg.stage !== "paid" && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow+"40"}}>
+    {isAssignmentWaitingClient(asg) && asg.stage !== "payment_disbursed" && <Card className="p-3 mb-4" style={{background: B.yellowL, borderColor: B.yellow+"40"}}>
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-start gap-2">
           <Clock size={14} style={{color: B.yellow}} className="shrink-0 mt-0.5"/>
           <div className="text-[11px]" style={{color: B.t2}}>
             <strong style={{color: B.yellow}}>Ожидаем клиента.</strong>{" "}
-            {asg.stage === "debtor_confirming" && `Должник (${debtor?.name}) должен подтвердить получение документов.`}
-            {asg.stage === "ds_signing_client" && `Клиент (${creditor?.name}) должен подписать ДС.`}
+            {asg.stage === "debtor_signing" && `Должник (${debtor?.name}) должен подтвердить получение документов.`}
+            {asg.stage === "df_signing_creditor" && `Клиент (${creditor?.name}) должен подписать ДФ + акт сверки.`}
             {" Банк SLA не нарушает. Можно напомнить клиенту."}
           </div>
         </div>
@@ -10467,7 +12431,7 @@ function AssignmentsPage({currentUser, setToast}) {
 
   // KPI stats
   // Active = в работе банка (до debtor_paid)
-  const activeCount = assignmentsData.filter(a => a.stage !== "debtor_paid" && a.stage !== "returned_to_supplier").length;
+  const activeCount = assignmentsData.filter(a => a.stage !== "assignment_closed" && a.stage !== "returned_to_creditor").length;
   // Paid to client last month — включает все post-paid стадии
   const paidMonthCount = assignmentsData.filter(a => {
     if (!isAssignmentPaidToClient(a)) return false;
@@ -10500,9 +12464,9 @@ function AssignmentsPage({currentUser, setToast}) {
     const stages = [...new Set(items.map(a => a.stage))];
     if (stages.length !== 1) return {type: "mixed", count: items.length};
     const stage = stages[0];
-    if (stage === "usko_checking") return {type: "usko_check", count: items.length, stage};
-    if (stage === "ds_signing_bank") return {type: "sign_ds", count: items.length, stage};
-    if (stage === "payment_approved") return {type: "pay", count: items.length, stage};
+    if (stage === "usko_review") return {type: "usko_check", count: items.length, stage};
+    if (stage === "df_signing_bank") return {type: "sign_ds", count: items.length, stage};
+    if (stage === "payment_authorization") return {type: "pay", count: items.length, stage};
     return {type: "other", count: items.length, stage};
   };
 
@@ -10510,15 +12474,35 @@ function AssignmentsPage({currentUser, setToast}) {
     const action = getBatchAction();
     if (!action || action.type === "mixed" || action.type === "other") return;
 
-    let nextStage, msg;
-    if (action.type === "usko_check") { nextStage = "ds_preparing"; msg = "Комплекты проверены, ДС к формированию"; }
-    else if (action.type === "sign_ds") { nextStage = "ds_signing_client"; msg = "ДС подписаны ЭЦП банка"; }
-    else if (action.type === "pay") { nextStage = "paid"; msg = "Оплата проведена"; }
+    let nextStage, msg, extraData = {};
+    if (action.type === "usko_check") {
+      // Smart routing: ≤50K → abs_card_creation, >50K → lpr_decision_assignment
+      // Если выборка смешанная — отправим всех в abs_card_creation для упрощения batch
+      nextStage = "abs_card_creation";
+      msg = "Комплекты проверены, переход на оформление АБС";
+    }
+    else if (action.type === "sign_ds") {
+      nextStage = "df_signing_creditor";
+      msg = "ДФ подписаны ЭЦП банка пачкой";
+      extraData = {
+        signatures: undefined, // отдельная логика в map ниже
+      };
+    }
+    else if (action.type === "pay") { nextStage = "payment_disbursed"; msg = "Распоряжения отправлены в АБС"; }
 
-    setAssignmentsData(prev => prev.map(a => selectedIds.includes(a.id)
-      ? {...a, stage: nextStage, stageStartDate: "2026-03-26",
-          history: [...(a.history||[]), {action: `batch_${action.type}`, user: currentUser.name, userRole: currentUser.role, date: "2026-03-26 14:00", comment: "Пачечная обработка"}]}
-      : a));
+    setAssignmentsData(prev => prev.map(a => {
+      if (!selectedIds.includes(a.id)) return a;
+      const updated = {...a, stage: nextStage, stageStartDate: "2026-03-26",
+        history: [...(a.history||[]), {action: `batch_${action.type}`, user: currentUser.name, userRole: currentUser.role, date: "2026-03-26 14:00", comment: "Пачечная обработка"}]};
+      // Если sign_ds — отметим подпись банка
+      if (action.type === "sign_ds") {
+        updated.signatures = {
+          ...(getAssignmentSignatures(a) || {}),
+          bank: {signed: true, signedBy: currentUser.name, signedAt: "2026-03-26", certNumber: "GS-CERT-2026-XXX"},
+        };
+      }
+      return updated;
+    }));
     setBatchMode(false);
     setSelectedIds([]);
     setToast({msg: `${msg} · ${action.count} уступок`, type: "success"});
@@ -10566,7 +12550,7 @@ function AssignmentsPage({currentUser, setToast}) {
     <div className="grid grid-cols-6 gap-2.5 mb-5">
       {ASSIGNMENT_PHASES.map(phase => {
         // "debtor_paid" = fully closed cycle — exclude from active counts
-        const items = assignmentsData.filter(a => a.stage !== "debtor_paid" && getAssignmentPhase(a.stage) === phase.id);
+        const items = assignmentsData.filter(a => a.stage !== "assignment_closed" && getAssignmentPhase(a.stage) === phase.id);
         const isActive = phaseFilter === phase.id;
         const count = items.length;
         // Color-code the recover phase specially (indigo)
@@ -10640,8 +12624,12 @@ function AssignmentsPage({currentUser, setToast}) {
       </button>
 
       <div className="ml-auto flex items-center gap-2">
-        {!batchMode && myStages.length > 0 && <Btn size="sm" variant="secondary" icon={Check} onClick={()=>setBatchMode(true)}>
-          Пачечная обработка
+        {!batchMode && myStages.length > 0 && <Btn size="sm" variant="secondary"
+          icon={currentUser.role === "signer" ? Pen : Check}
+          onClick={()=>setBatchMode(true)}>
+          {currentUser.role === "signer" ? "🔏 Подписать пачкой"
+            : currentUser.role === "usko_prepare" ? "📋 Обработать пачкой"
+            : "Пачечная обработка"}
         </Btn>}
         {batchMode && <>
           <Btn size="sm" variant="ghost" onClick={()=>{setBatchMode(false); setSelectedIds([])}}>Отмена</Btn>
@@ -10687,13 +12675,13 @@ function AssignmentsPage({currentUser, setToast}) {
             Этап не поддерживает пачку
           </span>}
           {batchAction?.type === "usko_check" && <span className="text-[11px]" style={{color: B.t2}}>
-            → Пачечная проверка комплектов
+            → Пачечная проверка комплектов УСКО
           </span>}
           {batchAction?.type === "sign_ds" && <span className="text-[11px]" style={{color: B.t2}}>
-            → Пачечная подпись ДС ЭЦП банка
+            → 🔏 Пачечная подпись ДФ ЭЦП банка
           </span>}
           {batchAction?.type === "pay" && <span className="text-[11px]" style={{color: B.t2}}>
-            → Пачечное проведение оплаты
+            → 💰 Пачечное оформление распоряжений
           </span>}
         </div>
         {batchAction && (batchAction.type === "usko_check" || batchAction.type === "sign_ds" || batchAction.type === "pay") && <Btn size="sm" icon={Check} onClick={doBatchAction}>
@@ -11517,13 +13505,13 @@ function ClientsPage({pushNav, setToast}) {
   if (selectedClient) return <ClientDetailView client={selectedClient} onBack={()=>setSelectedClient(null)} setToast={setToast}/>;
 
   return <div>
-    <PageHeader title={topTab === "clients" ? "Клиенты" : "Контрагенты-должники"}
-      breadcrumbs={["Клиенты", topTab === "contractors" ? "Контрагенты" : undefined].filter(Boolean)}
+    <PageHeader title={topTab === "clients" ? "Клиенты" : topTab === "contractors" ? "Контрагенты-должники" : "Приглашения должников"}
+      breadcrumbs={["Клиенты", topTab === "contractors" ? "Контрагенты" : topTab === "invitations" ? "Приглашения" : undefined].filter(Boolean)}
       actions={<div className="flex items-center gap-2">
         {topTab === "clients" && <Btn size="sm" variant="primary" icon={Plus} onClick={() => setOnboardingWizardOpen(true)}>
           Зарегистрировать клиента
         </Btn>}
-        <ExportButton filename={topTab === "clients" ? "klienty" : "kontragenty"} setToast={setToast}
+        {topTab !== "invitations" && <ExportButton filename={topTab === "clients" ? "klienty" : "kontragenty"} setToast={setToast}
         columns={topTab === "clients" ? [
           {key: "name", label: "Название"},
           {key: "unp", label: "УНП"},
@@ -11540,10 +13528,10 @@ function ClientsPage({pushNav, setToast}) {
           {key: "assignmentCount", label: "Кол-во уступок"},
           {key: "totalVolume", label: "Общая сумма"},
         ]}
-        rows={topTab === "clients" ? filteredClients : filteredContractors}/>
+        rows={topTab === "clients" ? filteredClients : filteredContractors}/>}
       </div>}/>
 
-    {/* Top tab selector: Clients (creditors) vs Contractors (debtors) */}
+    {/* Top tab selector: Clients (creditors) vs Contractors (debtors) vs Invitations */}
     <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 mb-5 inline-flex">
       <button onClick={()=>{setTopTab("clients"); setFilter("all");}}
         className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${topTab==="clients"?"bg-white shadow-sm":"hover:text-slate-700"}`}
@@ -11561,6 +13549,15 @@ function ClientsPage({pushNav, setToast}) {
         <span className="ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
           style={topTab==="contractors" ? {background: B.purpleL, color: B.purple} : {background: "transparent", color: B.t3}}>
           {debtorsEnriched.length}
+        </span>
+      </button>
+      <button onClick={()=>setTopTab("invitations")}
+        className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${topTab==="invitations"?"bg-white shadow-sm":"hover:text-slate-700"}`}
+        style={topTab==="invitations" ? {color: "#0891B2"} : {color: B.t3}}>
+        Приглашения должников
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold"
+          style={topTab==="invitations" ? {background: "#CFFAFE", color: "#0891B2"} : {background: "transparent", color: B.t3}}>
+          {DEBTOR_INVITATIONS.length}
         </span>
       </button>
     </div>
@@ -11719,6 +13716,109 @@ function ClientsPage({pushNav, setToast}) {
         <Pagination {...contractorsPagination} pageSize={PAGE_SIZE}/>
       </Card>
     </>}
+
+    {/* ═══ ПРИГЛАШЕНИЯ ДОЛЖНИКОВ — admin/usko/analyst view ═══ */}
+    {topTab === "invitations" && (() => {
+      const allInvs = DEBTOR_INVITATIONS;
+      const verified = allInvs.filter(i => i.status === "verified");
+      const pending = allInvs.filter(i => ["sent", "opened", "registered", "identification_in_progress", "scoring_in_progress"].includes(i.status));
+      const rejected = allInvs.filter(i => i.status === "rejected");
+
+      return <>
+        {/* KPI strip */}
+        <div className="grid grid-cols-4 gap-3 mb-5">
+          <Card className="p-3" style={{background: "#F0F9FF"}}>
+            <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: "#0891B2"}}>Всего</div>
+            <div className="text-2xl font-black mono mt-1" style={{color: B.t1}}>{allInvs.length}</div>
+            <div className="text-[10px]" style={{color: B.t3}}>приглашений</div>
+          </Card>
+          <Card className="p-3" style={{background: B.greenL}}>
+            <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: B.green}}>Верифицировано</div>
+            <div className="text-2xl font-black mono mt-1" style={{color: B.green}}>{verified.length}</div>
+            <div className="text-[10px]" style={{color: B.t3}}>лимит установлен</div>
+          </Card>
+          <Card className="p-3" style={{background: "#FAF5FF"}}>
+            <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: "#A855F7"}}>В процессе</div>
+            <div className="text-2xl font-black mono mt-1" style={{color: "#A855F7"}}>{pending.length}</div>
+            <div className="text-[10px]" style={{color: B.t3}}>ждут верификации</div>
+          </Card>
+          <Card className="p-3" style={{background: B.redL}}>
+            <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: B.red}}>Отклонено</div>
+            <div className="text-2xl font-black mono mt-1" style={{color: B.red}}>{rejected.length}</div>
+            <div className="text-[10px]" style={{color: B.t3}}>по скорингу</div>
+          </Card>
+        </div>
+
+        {/* Info banner */}
+        <Card className="p-4 mb-4" style={{background: "#EEF2FF", borderColor: "#6366F1" + "30"}}>
+          <div className="flex items-start gap-2">
+            <span className="text-base shrink-0">ℹ️</span>
+            <div className="text-[11px]" style={{color: B.t2}}>
+              <strong style={{color: "#6366F1"}}>Шаг 0 факторингового конвейера.</strong> Кредитор приглашает должника на верификацию через свой личный кабинет.
+              Должник проходит регистрацию и идентификацию → банк проводит скоринг (1-2 рабочих дня) → устанавливается лимит (объём).
+              После верификации кредитор может создавать уступки на этого должника.
+            </div>
+          </div>
+        </Card>
+
+        {/* Full table */}
+        <Card className="p-0 mb-5">
+          <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead style={{background: "#F8FAFC", borderBottom: `1px solid ${B.border}`}}>
+              <tr>
+                <th className="text-left px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Должник</th>
+                <th className="text-left px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Кредитор</th>
+                <th className="text-left px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Отправлено</th>
+                <th className="text-left px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Статус</th>
+                <th className="text-right px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Лимит</th>
+                <th className="text-left px-4 py-2.5 text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>Решение</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allInvs.map(inv => {
+                const statusCfg = INVITATION_STATUS_LABELS[inv.status];
+                const debtorCompany = inv.debtorCompanyId ? COMPANIES.find(c => c.id === inv.debtorCompanyId) : null;
+                return <tr key={inv.id} className="border-b hover:bg-slate-50" style={{borderColor: B.border}}>
+                  <td className="px-4 py-2.5">
+                    <div className="font-semibold" style={{color: B.t1}}>{debtorCompany?.name || inv.debtorCompanyHint}</div>
+                    {debtorCompany && <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>УНП {debtorCompany.unp}</div>}
+                    {!debtorCompany && <div className="text-[10px] mt-0.5" style={{color: B.t3}}>{inv.debtorEmail}</div>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div style={{color: B.t2}}>{inv.creditorName}</div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="mono text-[11px]" style={{color: B.t2}}>{inv.sentAt?.split(" ")[0]}</div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold inline-flex items-center gap-1" style={{background: statusCfg.color + "15", color: statusCfg.color}}>
+                      <span>{statusCfg.icon}</span> {statusCfg.label}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    {inv.approvedLimit ? <span className="font-bold mono" style={{color: B.green}}>{fmtByn(inv.approvedLimit)}</span>
+                      : <span style={{color: B.t3}}>—</span>}
+                  </td>
+                  <td className="px-4 py-2.5 text-[11px]" style={{color: B.t3}}>
+                    {inv.status === "verified" && <>
+                      <div style={{color: B.t2}}>✓ {inv.verifiedAt?.split(" ")[0]}</div>
+                      <div className="text-[10px]">{inv.approvedBy}</div>
+                    </>}
+                    {inv.status === "rejected" && <>
+                      <div style={{color: B.red}}>✗ {inv.rejectedAt?.split(" ")[0]}</div>
+                      <div className="text-[10px] truncate max-w-[200px]" title={inv.rejectReason}>{inv.rejectReason}</div>
+                    </>}
+                    {!["verified", "rejected"].includes(inv.status) && <span>в процессе</span>}
+                  </td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+          </div>
+        </Card>
+      </>;
+    })()}
 
     {/* ═══ ONBOARDING WIZARD ═══ */}
     {onboardingWizardOpen && <ClientOnboardingWizard
@@ -12194,7 +14294,7 @@ function OnboardingStep5({formData, update}) {
 
   return <div className="space-y-2 text-xs max-h-[400px] overflow-y-auto">
     <div className="text-[10px] mb-2" style={{color: B.t3}}>
-      Комплаенс-офицер проверяет каждый стоп-фактор. Отметьте «Проверено» — для всех проверенных, «Выявлено» — если фактор обнаружен у клиента.
+      Аналитик проверяет каждый стоп-фактор. Отметьте «Проверено» — для всех проверенных, «Выявлено» — если фактор обнаружен у клиента.
     </div>
     {STOP_FACTORS.map(sf => {
       const isChecked = formData.stopFactorsChecked.includes(sf.id);
@@ -12392,6 +14492,12 @@ function ClientDetailView({client, onBack, setToast}) {
   const [rateModal, setRateModal] = useState(false);
   const [newLimit, setNewLimit] = useState(client.limit||0);
   const [newRate, setNewRate] = useState(client.rate||25);
+  // ─── Сессия 3: приглашения должников ───
+  const [inviteDebtorModal, setInviteDebtorModal] = useState(false);
+  const [invitationsState, setInvitationsState] = useState(DEBTOR_INVITATIONS);
+  // ─── Сессия 4: создание уступки ───
+  const [createAsgModal, setCreateAsgModal] = useState(null); // null | preselectedDebtor object
+  const [assignmentsState, setAssignmentsState] = useState(ASSIGNMENTS);
 
   const clientDeals = ALL_DEALS.filter(d=>d.creditorId===client.id||d.debtorId===client.id);
   // Active factoring deals (from pipeline) — per customer feedback, show them on client page
@@ -12606,11 +14712,292 @@ function ClientDetailView({client, onBack, setToast}) {
         <div>
           <div className="text-xs font-bold" style={{color: B.green}}>✅ Активный клиент</div>
           <div className="text-[11px] mt-0.5" style={{color: B.t2}}>
-            Ген.договор факторинга подписан. Клиент может создавать уступки по лимиту {fmtByn(client.limit||0)}.
+            Скоринг подтверждён, клиент активирован. Может создавать уступки и приглашать должников.
           </div>
         </div>
       </div>
     </Card>}
+
+    {/* ═══ КАРТОЧКА ЛИМИТА КАК ДОЛЖНИКА (для всех ЮЛ которые могут выступать должниками) ═══ */}
+    {isCompanyDebtor(client) && (() => {
+      const limitInfo = getDebtorLimit(client);
+      if (!limitInfo) return null;
+      const usedPercent = limitInfo.total > 0 ? Math.round((limitInfo.used / limitInfo.total) * 100) : 0;
+      const debtorActiveAsgs = getDebtorActiveAssignments(client.id, ASSIGNMENTS);
+      return <Card className="p-5 mb-4" style={{background: "#F0F9FF", borderColor: "#0891B2" + "40", borderWidth: 1}}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-base">🚚</span>
+            <h3 className="text-sm font-bold" style={{color: B.t1}}>Лимит как должника (объём)</h3>
+            {limitInfo.isRejected && <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{background: B.redL, color: B.red}}>
+              ⚠ ОТКЛОНЁН
+            </span>}
+          </div>
+          {limitInfo.decisionId && <div className="text-[10px] mono" style={{color: B.t3}}>
+            Решение #{limitInfo.decisionId}
+          </div>}
+        </div>
+
+        {limitInfo.isRejected ? <div className="p-3 rounded-lg" style={{background: B.redL}}>
+          <div className="text-xs font-bold" style={{color: B.red}}>Лимит отклонён</div>
+          <div className="text-[11px] mt-1" style={{color: B.t2}}>{limitInfo.rejectReason || "Причина не указана"}</div>
+        </div> : <>
+          {/* Лимит метрики */}
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+              <div className="text-[10px]" style={{color: B.t3}}>Всего одобрено</div>
+              <div className="text-lg font-black mono" style={{color: B.t1}}>{fmtByn(limitInfo.total)}</div>
+            </div>
+            <div className="p-3 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+              <div className="text-[10px]" style={{color: B.t3}}>Использовано</div>
+              <div className="text-lg font-black mono" style={{color: usedPercent > 80 ? B.orange : B.t2}}>{fmtByn(limitInfo.used)}</div>
+              <div className="text-[9px]" style={{color: B.t3}}>{usedPercent}% от лимита</div>
+            </div>
+            <div className="p-3 rounded-lg" style={{background: B.greenL, border: `1px solid ${B.green}30`}}>
+              <div className="text-[10px]" style={{color: B.t3}}>Доступно</div>
+              <div className="text-lg font-black mono" style={{color: B.green}}>{fmtByn(limitInfo.available)}</div>
+            </div>
+          </div>
+
+          {/* Прогресс-бар */}
+          <div className="mb-3">
+            <div className="h-2 rounded-full overflow-hidden" style={{background: "#F1F5F9"}}>
+              <div className="h-full transition-all" style={{
+                width: `${usedPercent}%`,
+                background: usedPercent > 80 ? B.orange : usedPercent > 50 ? B.yellow : B.green,
+              }}/>
+            </div>
+          </div>
+
+          {/* Решение по лимиту */}
+          <div className="text-[11px] flex items-center gap-2 flex-wrap" style={{color: B.t3}}>
+            <span>Установлен:</span>
+            <strong className="mono" style={{color: B.t2}}>{limitInfo.approvedDate || "—"}</strong>
+            <span style={{color: B.t3}}>·</span>
+            <span>Кем:</span>
+            <strong style={{color: B.t2}}>{limitInfo.approvedBy || "—"}</strong>
+          </div>
+
+          {/* Активные уступки на этого должника */}
+          {debtorActiveAsgs.length > 0 && <div className="mt-3 pt-3 border-t" style={{borderColor: B.border}}>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+              Активные уступки на этого должника ({debtorActiveAsgs.length})
+            </div>
+            <div className="space-y-1.5">
+              {debtorActiveAsgs.slice(0, 5).map(asg => {
+                const summary = getAssignmentSummary(asg);
+                const stage = ASSIGNMENT_STAGES.find(s => s.id === asg.stage);
+                const creditor = COMPANIES.find(c => c.id === asg.creditorId);
+                return <div key={asg.id} className="flex items-center justify-between gap-2 p-2 rounded text-[11px]" style={{background: "white"}}>
+                  <div className="flex-1 min-w-0">
+                    <span className="mono font-semibold" style={{color: B.t1}}>{summary.dfNumber}</span>
+                    <span style={{color: B.t3}}> · от </span>
+                    <span style={{color: B.t2}}>{creditor?.name || "—"}</span>
+                  </div>
+                  <span className="mono font-bold" style={{color: B.t1}}>{fmtByn(asg.amount)}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded" style={{background: stage?.color + "15", color: stage?.color}}>
+                    {stage?.label || asg.stage}
+                  </span>
+                </div>;
+              })}
+              {debtorActiveAsgs.length > 5 && <div className="text-[10px] text-center" style={{color: B.t3}}>
+                ...и ещё {debtorActiveAsgs.length - 5}
+              </div>}
+            </div>
+          </div>}
+        </>}
+
+        <div className="mt-3 pt-3 border-t text-[10px] flex items-start gap-1.5" style={{borderColor: B.border, color: B.t3}}>
+          <Info size={11} className="shrink-0 mt-0.5"/>
+          <span>
+            Лимит устанавливается банком при верификации должника. Каждая новая уступка от любого кредитора уменьшает доступную часть.
+            После погашения должником лимит восстанавливается.
+          </span>
+        </div>
+      </Card>;
+    })()}
+
+    {/* ═══ КАРТОЧКА «МОИ ДОЛЖНИКИ» (для кредиторов) ═══ */}
+    {isCompanyCreditor(client) && (() => {
+      const myInvitations = invitationsState.filter(inv => inv.creditorId === client.id);
+      const verified = myInvitations.filter(i => i.status === "verified");
+      const pending = myInvitations.filter(i => ["sent", "opened", "registered", "identification_in_progress", "scoring_in_progress"].includes(i.status));
+      const rejected = myInvitations.filter(i => i.status === "rejected");
+
+      return <Card className="p-5 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-base">🚚</span>
+            <h3 className="text-sm font-bold" style={{color: B.t1}}>Мои должники (приглашения)</h3>
+            <span className="text-[10px] px-2 py-0.5 rounded-full" style={{background: "#F1F5F9", color: B.t2}}>
+              {myInvitations.length}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            {verified.length > 0 && <Btn size="sm" variant="secondary" icon={FileText} onClick={() => setCreateAsgModal({_noPreselect: true})}>
+              Новая уступка
+            </Btn>}
+            <Btn size="sm" variant="primary" icon={Plus} onClick={() => setInviteDebtorModal(true)}>
+              Пригласить должника
+            </Btn>
+          </div>
+        </div>
+
+        {myInvitations.length === 0 ? <div className="text-center py-6 text-[11px]" style={{color: B.t3}}>
+          Вы ещё никого не приглашали. Чтобы создавать уступки, сначала пригласите должника на верификацию.
+        </div> : <>
+          {/* Верифицированные — основной workflow */}
+          {verified.length > 0 && <div className="mb-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-1.5" style={{color: B.green}}>
+              <CheckCircle size={11}/> Верифицированы — можно создавать уступки ({verified.length})
+            </div>
+            <div className="space-y-1.5">
+              {verified.map(inv => {
+                const debtorCompany = COMPANIES.find(c => c.id === inv.debtorCompanyId);
+                const limitInfo = debtorCompany ? getDebtorLimit(debtorCompany) : null;
+                return <div key={inv.id} className="flex items-center justify-between gap-2 p-2.5 rounded-lg" style={{background: B.greenL, border: `1px solid ${B.green}30`}}>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold" style={{color: B.t1}}>{debtorCompany?.name || inv.debtorCompanyHint}</div>
+                    <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                      <span className="mono">УНП {debtorCompany?.unp || "—"}</span>
+                      <span className="mx-1">·</span>
+                      <span>верифицирован {inv.verifiedAt?.split(" ")[0]}</span>
+                    </div>
+                  </div>
+                  {limitInfo && <div className="text-right shrink-0">
+                    <div className="text-[9px]" style={{color: B.t3}}>Доступно</div>
+                    <div className="text-xs font-bold mono" style={{color: B.green}}>{fmtByn(limitInfo.available)}</div>
+                  </div>}
+                  <Btn size="sm" variant="primary" icon={Plus} onClick={() => setCreateAsgModal(debtorCompany)}>
+                    Уступка
+                  </Btn>
+                </div>;
+              })}
+            </div>
+          </div>}
+
+          {/* В процессе */}
+          {pending.length > 0 && <div className="mb-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-1.5" style={{color: "#A855F7"}}>
+              <Clock size={11}/> В процессе верификации ({pending.length})
+            </div>
+            <div className="space-y-1.5">
+              {pending.map(inv => {
+                const statusCfg = INVITATION_STATUS_LABELS[inv.status];
+                // Compute timeline progress
+                const stages = ["sent", "opened", "registered", "identification_in_progress", "scoring_in_progress"];
+                const stageIdx = stages.indexOf(inv.status);
+                const progress = ((stageIdx + 1) / stages.length) * 100;
+                return <div key={inv.id} className="p-2.5 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold" style={{color: B.t1}}>{inv.debtorCompanyHint}</div>
+                      <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                        <span>{inv.debtorEmail}</span>
+                        <span className="mx-1">·</span>
+                        <span>отправлено {inv.sentAt?.split(" ")[0]}</span>
+                      </div>
+                    </div>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold shrink-0" style={{background: statusCfg.color + "15", color: statusCfg.color}}>
+                      {statusCfg.icon} {statusCfg.label}
+                    </span>
+                  </div>
+                  {/* Mini-timeline */}
+                  <div className="flex items-center gap-0.5 mt-2">
+                    {stages.map((s, i) => {
+                      const isDone = i <= stageIdx;
+                      return <div key={s} className="flex-1 h-1 rounded-full" style={{
+                        background: isDone ? statusCfg.color : "#E2E8F0",
+                      }}/>;
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="text-[9px]" style={{color: B.t3}}>
+                      Этап {stageIdx + 1}/{stages.length}
+                    </div>
+                    <button onClick={() => {
+                      navigator.clipboard?.writeText(inv.invitationLink);
+                      setToast && setToast({msg: "Ссылка скопирована", type: "success"});
+                    }} className="text-[10px] hover:underline" style={{color: B.accent}}>
+                      📎 Скопировать ссылку
+                    </button>
+                  </div>
+                </div>;
+              })}
+            </div>
+          </div>}
+
+          {/* Отклонённые */}
+          {rejected.length > 0 && <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider mb-2 flex items-center gap-1.5" style={{color: B.red}}>
+              <XCircle size={11}/> Отклонены ({rejected.length})
+            </div>
+            <div className="space-y-1.5">
+              {rejected.map(inv => <div key={inv.id} className="p-2.5 rounded-lg" style={{background: B.redL, border: `1px solid ${B.red}30`}}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold" style={{color: B.t1}}>{inv.debtorCompanyHint}</div>
+                    <div className="text-[10px] mt-0.5" style={{color: B.red}}>
+                      ⚠ {inv.rejectReason}
+                    </div>
+                    <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                      Отклонён {inv.rejectedAt?.split(" ")[0]} · {inv.rejectedBy}
+                    </div>
+                  </div>
+                </div>
+              </div>)}
+            </div>
+          </div>}
+        </>}
+
+        <div className="mt-4 pt-3 border-t text-[10px] flex items-start gap-1.5" style={{borderColor: B.border, color: B.t3}}>
+          <Info size={11} className="shrink-0 mt-0.5"/>
+          <span>
+            <strong>Шаг 0 факторингового конвейера:</strong> кредитор приглашает должника на верификацию. Должник проходит идентификацию + скоринг → банк устанавливает лимит. Только после этого можно создавать уступки на этого должника.
+          </span>
+        </div>
+      </Card>;
+    })()}
+
+    {/* ═══ MODAL: Пригласить должника ═══ */}
+    {inviteDebtorModal && <InviteDebtorModal
+      creditor={client}
+      onClose={() => setInviteDebtorModal(false)}
+      onInvite={(invData) => {
+        const newInvitation = {
+          id: `INV-${String(invitationsState.length + 1).padStart(3, "0")}`,
+          creditorId: client.id,
+          creditorName: client.name,
+          ...invData,
+          sentAt: new Date().toISOString().slice(0, 19).replace("T", " "),
+          status: "sent",
+          debtorCompanyId: null,
+          openedAt: null,
+        };
+        setInvitationsState(prev => [...prev, newInvitation]);
+        setInviteDebtorModal(false);
+        setToast && setToast({
+          msg: `Приглашение отправлено: ${invData.debtorEmail}`,
+          type: "success",
+        });
+      }}/>}
+
+    {/* ═══ MODAL: Создание уступки ═══ */}
+    {createAsgModal && <CreateAssignmentModal
+      creditor={client}
+      preselectedDebtor={createAsgModal._noPreselect ? null : createAsgModal}
+      allInvitations={invitationsState}
+      allAssignments={assignmentsState}
+      onClose={() => setCreateAsgModal(null)}
+      onCreate={(newAsg) => {
+        setAssignmentsState(prev => [...prev, newAsg]);
+        setCreateAsgModal(null);
+        setToast && setToast({
+          msg: `Уступка ${newAsg.dfNumber} создана. Передана УСКО на проверку.`,
+          type: "success",
+        });
+      }}
+      setToast={setToast}/>}
 
     <div className="grid gap-6" style={{gridTemplateColumns:"1fr 280px"}}>
       <div className="space-y-5 min-w-0">
@@ -12649,7 +15036,7 @@ function ClientDetailView({client, onBack, setToast}) {
           <div className="space-y-2">
             {clientActiveDeals.map(deal => {
               const dealAssignments = ASSIGNMENTS.filter(a => a.dealId === deal.id);
-              const usedAmount = dealAssignments.filter(a => a.stage === "paid").reduce((s,a) => s+a.amount, 0);
+              const usedAmount = dealAssignments.filter(a => a.stage === "payment_disbursed").reduce((s,a) => s+a.amount, 0);
               const limit = deal.approvedLimit || 0;
               const usagePct = limit > 0 ? Math.round(usedAmount/limit*100) : 0;
               return <button key={deal.id}
@@ -13155,6 +15542,819 @@ function ClientDetailView({client, onBack, setToast}) {
 
 function ClientDetailPage({popNav,pushNav,setToast}) {
   return <div><PageHeader title="Детали клиента" breadcrumbs={["Клиенты","Детали"]} onBack={popNav}/></div>;
+}
+
+// ═══════════════════════════════════════════════════════════
+// InviteDebtorModal — приглашение должника на верификацию (Phase 0 нового workflow)
+// ═══════════════════════════════════════════════════════════
+function InviteDebtorModal({creditor, onClose, onInvite}) {
+  const [debtorCompanyHint, setDebtorCompanyHint] = useState("");
+  const [debtorEmail, setDebtorEmail] = useState("");
+  const [debtorPhone, setDebtorPhone] = useState("");
+  const [unp, setUnp] = useState("");
+  const [message, setMessage] = useState("");
+  const [previewMode, setPreviewMode] = useState(false);
+
+  // Auto-generate invitation link (mock)
+  const invitationLink = `https://oborotka.by/r/${Math.random().toString(36).substring(2, 14)}`;
+
+  const isValid = debtorCompanyHint.trim() && debtorEmail.includes("@") && (debtorPhone.length >= 10 || unp.length === 9);
+
+  const submit = () => {
+    onInvite({
+      debtorCompanyHint: debtorCompanyHint.trim(),
+      debtorEmail: debtorEmail.trim(),
+      debtorPhone: debtorPhone.trim(),
+      unp: unp.trim() || null,
+      message: message.trim() || null,
+      invitationLink,
+    });
+  };
+
+  return <Modal open={true} onClose={onClose} title="Пригласить должника на верификацию">
+    <div className="space-y-4">
+      {/* Info banner */}
+      <div className="p-3 rounded-lg" style={{background: "#EEF2FF", color: "#6366F1"}}>
+        <div className="flex items-start gap-2">
+          <span className="text-base shrink-0">ℹ️</span>
+          <div className="text-[11px]">
+            <strong>Шаг 0 факторингового конвейера.</strong> Ваш должник получит ссылку на регистрацию. После идентификации и скоринга банк установит ему лимит, и вы сможете создавать уступки на этого должника.
+          </div>
+        </div>
+      </div>
+
+      {!previewMode ? <>
+        {/* Form */}
+        <div>
+          <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+            Название организации должника <span style={{color: B.red}}>*</span>
+          </label>
+          <input value={debtorCompanyHint} onChange={e => setDebtorCompanyHint(e.target.value)}
+            placeholder="ООО «Название»"
+            className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+              УНП (если знаете)
+            </label>
+            <input value={unp} onChange={e => setUnp(e.target.value.replace(/\D/g, "").slice(0, 9))}
+              placeholder="190000000"
+              className="w-full px-3 py-2 text-sm rounded-lg border mono" style={{borderColor: B.border, color: B.t1}}/>
+            <div className="text-[9px] mt-1" style={{color: B.t3}}>9 цифр</div>
+          </div>
+          <div>
+            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+              Телефон должника
+            </label>
+            <input value={debtorPhone} onChange={e => setDebtorPhone(e.target.value)}
+              placeholder="+375 17 123-45-67"
+              className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+            Email должника <span style={{color: B.red}}>*</span>
+          </label>
+          <input type="email" value={debtorEmail} onChange={e => setDebtorEmail(e.target.value)}
+            placeholder="buh@company.by"
+            className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
+          <div className="text-[9px] mt-1" style={{color: B.t3}}>На этот адрес будет отправлено приглашение со ссылкой на регистрацию</div>
+        </div>
+
+        <div>
+          <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+            Сопроводительное сообщение (опционально)
+          </label>
+          <textarea value={message} onChange={e => setMessage(e.target.value)} rows={2}
+            placeholder="Например: «Олег, добрый день. Подключитесь к платформе для оформления факторинга по нашим поставкам»"
+            className="w-full px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
+        </div>
+
+        {/* What happens next */}
+        <div className="p-3 rounded-lg text-[10px]" style={{background: "#F8FAFC", color: B.t2}}>
+          <strong style={{color: B.t1}}>Что произойдёт после отправки:</strong>
+          <ol className="mt-1 space-y-0.5 ml-4 list-decimal">
+            <li>Должник получит email со ссылкой на регистрацию</li>
+            <li>Зарегистрируется на платформе и пройдёт идентификацию (МСИ или агент)</li>
+            <li>Банк проведёт скоринг должника (1-2 рабочих дня)</li>
+            <li>Если скоринг успешный — банк установит лимит (объём)</li>
+            <li>Вы получите уведомление и сможете создавать уступки на этого должника</li>
+          </ol>
+        </div>
+      </> : <>
+        {/* Preview mode */}
+        <div className="p-4 rounded-lg" style={{background: "white", border: `1px solid ${B.border}`}}>
+          <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+            Превью email-приглашения
+          </div>
+          <div className="text-xs" style={{color: B.t2}}>
+            <div className="mb-2">
+              <span style={{color: B.t3}}>Кому:</span> <strong style={{color: B.t1}}>{debtorEmail}</strong>
+            </div>
+            <div className="mb-2">
+              <span style={{color: B.t3}}>Тема:</span> <strong style={{color: B.t1}}>Приглашение к платформе Oborotka.by для факторинга</strong>
+            </div>
+            <hr className="my-3" style={{borderColor: B.border}}/>
+            <p className="mb-2">Здравствуйте,</p>
+            <p className="mb-2">
+              Компания <strong>{creditor.name}</strong> приглашает вас зарегистрироваться на платформе <strong>Oborotka.by</strong> для оформления факторингового финансирования по вашим поставкам.
+            </p>
+            {message && <p className="mb-2 italic" style={{color: B.t3}}>«{message}»</p>}
+            <p className="mb-2">
+              Для регистрации перейдите по ссылке:
+            </p>
+            <div className="p-2 rounded font-semibold mono break-all" style={{background: "#EEF2FF", color: "#6366F1"}}>
+              {invitationLink}
+            </div>
+            <p className="mt-3 mb-2">
+              Регистрация займёт около 10 минут. Потребуется паспорт руководителя и доступ к ЭЦП ГосСУОК.
+            </p>
+            <p className="mb-2">
+              Если у вас есть вопросы — обратитесь к менеджеру банка.
+            </p>
+            <p className="mt-4 text-[10px]" style={{color: B.t3}}>
+              С уважением, команда Oborotka.by · ЗАО «Нео Банк Азия»
+            </p>
+          </div>
+        </div>
+      </>}
+
+      {/* Footer */}
+      <div className="flex justify-between items-center pt-3 border-t" style={{borderColor: B.border}}>
+        <Btn variant="ghost" onClick={onClose}>Отмена</Btn>
+        <div className="flex gap-2">
+          <Btn variant="secondary" icon={Eye}
+            onClick={() => setPreviewMode(!previewMode)}
+            disabled={!isValid}>
+            {previewMode ? "Назад к редактированию" : "Превью email"}
+          </Btn>
+          <Btn variant="primary" icon={Mail} disabled={!isValid} onClick={submit}>
+            Отправить приглашение
+          </Btn>
+        </div>
+      </div>
+    </div>
+  </Modal>;
+}
+
+// ═══════════════════════════════════════════════════════════
+// CreateAssignmentModal — создание уступки (Phase 1 нового workflow)
+// 4-шаговый wizard:
+//   Шаг 1: Выбор/подтверждение должника + проверка лимита
+//   Шаг 2: Загрузка ДКП + реестр ТТН (несколько строк)
+//   Шаг 3: Существенные условия ДФ + auto-расчёт дисконта
+//   Шаг 4: Подтверждение и отправка
+// ═══════════════════════════════════════════════════════════
+function CreateAssignmentModal({creditor, preselectedDebtor, allInvitations, allAssignments, onClose, onCreate, setToast}) {
+  const [step, setStep] = useState(1);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Step 1: debtor selection
+  const [selectedDebtorId, setSelectedDebtorId] = useState(preselectedDebtor?.id || null);
+
+  // Step 2: documents
+  const [dkpFile, setDkpFile] = useState(null);
+  const [dkpNumber, setDkpNumber] = useState("");
+  const [dkpDate, setDkpDate] = useState("");
+  const [ttnRows, setTtnRows] = useState([
+    {ttnNumber: "", amount: "", shipDate: "", description: ""},
+  ]);
+
+  // Step 3: essential terms
+  const [rate, setRate] = useState(25);
+  const [termDays, setTermDays] = useState(60);
+
+  // ─── Verified debtors only ───
+  const verifiedDebtors = (allInvitations || [])
+    .filter(inv => inv.creditorId === creditor.id && inv.status === "verified")
+    .map(inv => COMPANIES.find(c => c.id === inv.debtorCompanyId))
+    .filter(Boolean);
+
+  const selectedDebtor = COMPANIES.find(c => c.id === selectedDebtorId);
+  const debtorLimit = selectedDebtor ? getDebtorLimit(selectedDebtor) : null;
+
+  // ─── Auto-calculations ───
+  const totalAmount = ttnRows.reduce((sum, row) => sum + (parseFloat(row.amount) || 0), 0);
+  const discount = totalAmount && rate && termDays
+    ? Math.round((totalAmount * (rate / 100) * termDays) / 365)
+    : 0;
+  const toReceive = totalAmount - discount;
+  const limitCheck = selectedDebtor && totalAmount > 0
+    ? canDebtorAcceptAssignment(selectedDebtor, totalAmount)
+    : null;
+
+  // Generate DF number based on today
+  const today = new Date().toISOString().slice(0, 10); // 2026-04-28
+  const todayAssignmentsCount = (allAssignments || []).filter(a => a.dfDate === today).length;
+  const dfNumber = `ДФ-${today}-${String(todayAssignmentsCount + 1).padStart(3, "0")}`;
+
+  // ─── Validation per step ───
+  const canGoStep2 = selectedDebtorId && limitCheck?.ok;
+  const canGoStep3 = dkpNumber.trim() && dkpDate && ttnRows.every(r => r.ttnNumber.trim() && parseFloat(r.amount) > 0);
+  const canGoStep4 = rate > 0 && termDays > 0 && totalAmount > 0;
+
+  // ─── Handlers ───
+  const addTtnRow = () => setTtnRows(prev => [...prev, {ttnNumber: "", amount: "", shipDate: today, description: ""}]);
+  const removeTtnRow = (idx) => setTtnRows(prev => prev.filter((_, i) => i !== idx));
+  const updateTtnRow = (idx, field, value) => setTtnRows(prev => prev.map((r, i) => i === idx ? {...r, [field]: value} : r));
+
+  const submit = () => {
+    setSubmitting(true);
+    setTimeout(() => {
+      const newAssignment = {
+        id: `ASG-NEW-${Date.now()}`,
+        dealId: `REQ-${creditor.id}`,
+        creditorId: creditor.id,
+        debtorId: selectedDebtorId,
+        amount: totalAmount,
+        discount, toReceive,
+        rate, termDays,
+        stage: "usko_review", // ← после создания сразу попадает к УСКО на проверку
+        stageStartDate: today,
+        createdDate: today,
+        // Новая модель
+        dfNumber, dfDate: today,
+        ttnRegistry: ttnRows.map(r => ({
+          ttnNumber: r.ttnNumber.trim(),
+          amount: parseFloat(r.amount),
+          shipDate: r.shipDate || today,
+          description: r.description.trim() || null,
+        })),
+        signatures: {
+          bank:               {signed: false, signedBy: null, signedAt: null, certNumber: null},
+          creditor_df:        {signed: false, signedAt: null},
+          creditor_act:       {signed: false, signedAt: null},
+          debtor_act:         {signed: false, signedAt: null},
+          debtor_notification:{signed: false, signedAt: null},
+        },
+        financing: {
+          accountNumber: null,
+          authorizationDate: null,
+          disbursedDate: null,
+          disbursedBy: null,
+        },
+        docs: {
+          dkp: {status: "uploaded", number: dkpNumber, date: dkpDate, filename: dkpFile?.name || "ДКП.pdf"},
+        },
+        history: [
+          {action: "assignment_created", user: creditor.name, userRole: "creditor", date: today + " " + new Date().toTimeString().slice(0, 5),
+           comment: `Создана уступка на ${fmtByn(totalAmount)} (${ttnRows.length} ТТН)`},
+        ],
+      };
+      setSubmitting(false);
+      onCreate(newAssignment);
+    }, 1200);
+  };
+
+  return <Modal open={true} onClose={onClose} title={`Новая уступка${selectedDebtor ? ` → ${selectedDebtor.name}` : ""}`}>
+    <div className="space-y-4">
+      {/* ─── Step indicator ─── */}
+      <div className="flex items-center gap-2 mb-2">
+        {[
+          {n: 1, label: "Должник"},
+          {n: 2, label: "Документы"},
+          {n: 3, label: "Условия"},
+          {n: 4, label: "Подтверждение"},
+        ].map((s, i, arr) => <React.Fragment key={s.n}>
+          <div className="flex items-center gap-1.5">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-colors"
+              style={{
+                background: step >= s.n ? B.accent : "#E2E8F0",
+                color: step >= s.n ? "white" : B.t3,
+              }}>
+              {step > s.n ? "✓" : s.n}
+            </div>
+            <span className="text-[11px] font-semibold" style={{color: step >= s.n ? B.t1 : B.t3}}>
+              {s.label}
+            </span>
+          </div>
+          {i < arr.length - 1 && <div className="flex-1 h-0.5" style={{background: step > s.n ? B.accent : "#E2E8F0"}}/>}
+        </React.Fragment>)}
+      </div>
+
+      {/* ─── STEP 1: Выбор должника ─── */}
+      {step === 1 && <div className="space-y-3">
+        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
+          Выберите верифицированного должника, на которого создаёте уступку
+        </div>
+
+        {verifiedDebtors.length === 0 ? <div className="p-4 rounded-lg text-center" style={{background: B.yellowL}}>
+          <div className="text-xs font-bold mb-1" style={{color: B.yellow}}>⚠ Нет верифицированных должников</div>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            Сначала пригласите должника на верификацию (Шаг 0). Когда банк проведёт скоринг и установит лимит — он появится в этом списке.
+          </div>
+        </div> : <div className="space-y-1.5 max-h-[280px] overflow-auto pr-1">
+          {verifiedDebtors.map(d => {
+            const limitInfo = getDebtorLimit(d);
+            const isSelected = d.id === selectedDebtorId;
+            const isUsable = !limitInfo?.isRejected && limitInfo?.available > 0;
+            return <button key={d.id} onClick={() => isUsable && setSelectedDebtorId(d.id)}
+              disabled={!isUsable}
+              className="w-full text-left p-3 rounded-lg transition-all"
+              style={{
+                background: isSelected ? B.accentL : "white",
+                border: `2px solid ${isSelected ? B.accent : B.border}`,
+                opacity: isUsable ? 1 : 0.5,
+                cursor: isUsable ? "pointer" : "not-allowed",
+              }}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-bold" style={{color: B.t1}}>{d.name}</div>
+                  <div className="text-[10px] mono mt-0.5" style={{color: B.t3}}>УНП {d.unp}</div>
+                  {limitInfo && <div className="text-[10px] mt-1" style={{color: B.t2}}>
+                    Лимит: <strong>{fmtByn(limitInfo.total)}</strong> · Доступно: <strong style={{color: B.green}}>{fmtByn(limitInfo.available)}</strong>
+                  </div>}
+                </div>
+                {isSelected && <CheckCircle size={18} style={{color: B.accent}} className="shrink-0"/>}
+                {!isUsable && <span className="text-[10px] px-2 py-0.5 rounded-full" style={{background: B.redL, color: B.red}}>
+                  Лимит исчерпан
+                </span>}
+              </div>
+            </button>;
+          })}
+        </div>}
+
+        {selectedDebtor && limitCheck && !limitCheck.ok && <div className="p-3 rounded-lg" style={{background: B.redL}}>
+          <div className="text-xs font-bold" style={{color: B.red}}>⚠ Невозможно создать уступку</div>
+          <div className="text-[11px] mt-1" style={{color: B.t2}}>{limitCheck.reason}</div>
+        </div>}
+      </div>}
+
+      {/* ─── STEP 2: Документы ─── */}
+      {step === 2 && <div className="space-y-3">
+        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
+          Загрузите договор купли-продажи и реестр ТТН за день
+        </div>
+
+        {/* ДКП */}
+        <div className="p-3 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+          <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.t3}}>
+            Договор купли-продажи (ДКП) <span style={{color: B.red}}>*</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <input value={dkpNumber} onChange={e => setDkpNumber(e.target.value)}
+              placeholder="№ договора, например ДКП-2026-001"
+              className="px-3 py-2 text-sm rounded-lg border mono" style={{borderColor: B.border, color: B.t1}}/>
+            <input type="date" value={dkpDate} onChange={e => setDkpDate(e.target.value)}
+              className="px-3 py-2 text-sm rounded-lg border" style={{borderColor: B.border, color: B.t1}}/>
+          </div>
+          <label className="flex items-center gap-2 p-2 rounded-lg cursor-pointer hover:bg-slate-50" style={{border: `1px dashed ${B.border}`}}>
+            <input type="file" accept=".pdf,.doc,.docx" onChange={e => setDkpFile(e.target.files?.[0] || null)} className="hidden"/>
+            <Plus size={14} style={{color: B.accent}}/>
+            <span className="text-[11px]" style={{color: dkpFile ? B.green : B.accent}}>
+              {dkpFile ? `✓ ${dkpFile.name}` : "Прикрепить файл (PDF/DOC)"}
+            </span>
+          </label>
+        </div>
+
+        {/* ТТН Registry */}
+        <div className="p-3 rounded-lg" style={{background: "#F8FAFC", border: `1px solid ${B.border}`}}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider" style={{color: B.t3}}>
+              Реестр ТТН (товарно-транспортные накладные за день) <span style={{color: B.red}}>*</span>
+            </div>
+            <Btn size="sm" variant="ghost" icon={Plus} onClick={addTtnRow}>Добавить ТТН</Btn>
+          </div>
+          <div className="space-y-1.5">
+            {ttnRows.map((row, idx) => <div key={idx} className="grid grid-cols-12 gap-1.5 items-center">
+              <input value={row.ttnNumber} onChange={e => updateTtnRow(idx, "ttnNumber", e.target.value)}
+                placeholder="№ ТТН"
+                className="col-span-3 px-2 py-1.5 text-xs rounded border mono" style={{borderColor: B.border, color: B.t1}}/>
+              <input type="number" value={row.amount} onChange={e => updateTtnRow(idx, "amount", e.target.value)}
+                placeholder="Сумма BYN" min="0" step="0.01"
+                className="col-span-2 px-2 py-1.5 text-xs rounded border mono text-right" style={{borderColor: B.border, color: B.t1}}/>
+              <input type="date" value={row.shipDate} onChange={e => updateTtnRow(idx, "shipDate", e.target.value)}
+                className="col-span-2 px-2 py-1.5 text-xs rounded border" style={{borderColor: B.border, color: B.t1}}/>
+              <input value={row.description} onChange={e => updateTtnRow(idx, "description", e.target.value)}
+                placeholder="Описание (опционально)"
+                className="col-span-4 px-2 py-1.5 text-xs rounded border" style={{borderColor: B.border, color: B.t1}}/>
+              {ttnRows.length > 1 && <button onClick={() => removeTtnRow(idx)} className="col-span-1 p-1.5 hover:bg-slate-100 rounded">
+                <X size={12} style={{color: B.red}}/>
+              </button>}
+            </div>)}
+          </div>
+          <div className="mt-2 pt-2 border-t flex items-center justify-between text-[11px]" style={{borderColor: B.border}}>
+            <span style={{color: B.t3}}>Итого по реестру:</span>
+            <span className="font-bold mono" style={{color: B.t1}}>{fmtByn(totalAmount)}</span>
+          </div>
+        </div>
+      </div>}
+
+      {/* ─── STEP 3: Существенные условия ─── */}
+      {step === 3 && <div className="space-y-3">
+        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
+          Существенные условия договора факторинга
+        </div>
+
+        <div className="p-3 rounded-lg" style={{background: "#EEF2FF", borderLeft: `3px solid ${B.accent}`}}>
+          <div className="flex items-center gap-2 mb-2">
+            <FileText size={14} style={{color: B.accent}}/>
+            <div className="text-xs font-bold" style={{color: B.t1}}>Будет сформирован {dfNumber}</div>
+          </div>
+          <div className="text-[10px]" style={{color: B.t3}}>
+            Договор факторинга на 1 страничку с реестром ТТН за {today}. Общие условия (оферта) — на сайте банка.
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+              Ставка дисконта (% годовых) <span style={{color: B.red}}>*</span>
+            </label>
+            <input type="number" value={rate} onChange={e => setRate(parseFloat(e.target.value) || 0)}
+              min="0" max="100" step="0.5"
+              className="w-full px-3 py-2 text-sm rounded-lg border mono text-right" style={{borderColor: B.border, color: B.t1}}/>
+            <div className="text-[9px] mt-1" style={{color: B.t3}}>Стандарт: 25% для класса A, 30% для B</div>
+          </div>
+          <div>
+            <label className="text-[11px] font-semibold block mb-1" style={{color: B.t2}}>
+              Срок отсрочки (дней) <span style={{color: B.red}}>*</span>
+            </label>
+            <input type="number" value={termDays} onChange={e => setTermDays(parseInt(e.target.value) || 0)}
+              min="1" max="180"
+              className="w-full px-3 py-2 text-sm rounded-lg border mono text-right" style={{borderColor: B.border, color: B.t1}}/>
+            <div className="text-[9px] mt-1" style={{color: B.t3}}>Стандарт: 60 дней (срок отсрочки должника)</div>
+          </div>
+        </div>
+
+        {/* Calculation preview */}
+        <div className="p-4 rounded-lg" style={{background: B.greenL, border: `1px solid ${B.green}30`}}>
+          <div className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{color: B.green}}>
+            Расчёт по уступке
+          </div>
+          <div className="space-y-1.5 text-[11px]">
+            <div className="flex justify-between">
+              <span style={{color: B.t2}}>Сумма уступки:</span>
+              <span className="mono font-bold" style={{color: B.t1}}>{fmtByn(totalAmount)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span style={{color: B.t2}}>Дисконт ({rate}% × {termDays}д / 365):</span>
+              <span className="mono font-bold" style={{color: B.red}}>− {fmtByn(discount)}</span>
+            </div>
+            <div className="pt-1.5 border-t flex justify-between text-sm" style={{borderColor: B.green + "40"}}>
+              <span className="font-bold" style={{color: B.t1}}>К получению (вам на счёт):</span>
+              <span className="mono font-black" style={{color: B.green}}>{fmtByn(toReceive)}</span>
+            </div>
+          </div>
+          <div className="mt-2 pt-2 border-t text-[10px]" style={{borderColor: B.green + "40", color: B.t3}}>
+            Формула: <strong>amount × (rate/100) × termDays / 365</strong>. Должник оплатит полную сумму через {termDays} дней.
+          </div>
+        </div>
+      </div>}
+
+      {/* ─── STEP 4: Подтверждение ─── */}
+      {step === 4 && <div className="space-y-3">
+        <div className="text-[11px] font-semibold" style={{color: B.t2}}>
+          Проверьте параметры уступки перед отправкой
+        </div>
+
+        {/* Summary card */}
+        <div className="p-4 rounded-lg" style={{background: "white", border: `2px solid ${B.accent}`}}>
+          <div className="text-xs font-bold mb-3" style={{color: B.accent}}>📋 {dfNumber}</div>
+
+          <div className="space-y-2.5 text-[11px]">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-[10px]" style={{color: B.t3}}>Кредитор (вы)</div>
+                <div className="font-semibold" style={{color: B.t1}}>{creditor.name}</div>
+              </div>
+              <div>
+                <div className="text-[10px]" style={{color: B.t3}}>Должник</div>
+                <div className="font-semibold" style={{color: B.t1}}>{selectedDebtor?.name}</div>
+              </div>
+            </div>
+
+            <div className="pt-2 border-t" style={{borderColor: B.border}}>
+              <div className="text-[10px] mb-1" style={{color: B.t3}}>ДКП</div>
+              <div className="font-semibold mono" style={{color: B.t1}}>№ {dkpNumber} от {dkpDate}</div>
+            </div>
+
+            <div className="pt-2 border-t" style={{borderColor: B.border}}>
+              <div className="text-[10px] mb-1" style={{color: B.t3}}>Реестр ТТН ({ttnRows.length} {ttnRows.length === 1 ? "штука" : "шт"})</div>
+              <div className="space-y-0.5">
+                {ttnRows.map((r, i) => <div key={i} className="flex justify-between">
+                  <span style={{color: B.t2}}>{r.ttnNumber} {r.description && `· ${r.description}`}</span>
+                  <span className="mono font-semibold" style={{color: B.t1}}>{fmtByn(parseFloat(r.amount) || 0)}</span>
+                </div>)}
+              </div>
+            </div>
+
+            <div className="pt-2 border-t grid grid-cols-3 gap-2" style={{borderColor: B.border}}>
+              <div>
+                <div className="text-[10px]" style={{color: B.t3}}>Сумма</div>
+                <div className="font-bold mono text-sm" style={{color: B.t1}}>{fmtByn(totalAmount)}</div>
+              </div>
+              <div>
+                <div className="text-[10px]" style={{color: B.t3}}>Дисконт</div>
+                <div className="font-bold mono text-sm" style={{color: B.red}}>− {fmtByn(discount)}</div>
+              </div>
+              <div>
+                <div className="text-[10px]" style={{color: B.t3}}>К выплате</div>
+                <div className="font-bold mono text-sm" style={{color: B.green}}>{fmtByn(toReceive)}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* What happens next */}
+        <div className="p-3 rounded-lg text-[10px]" style={{background: "#F8FAFC", color: B.t2}}>
+          <strong style={{color: B.t1}}>Что произойдёт после отправки:</strong>
+          <ol className="mt-1 space-y-0.5 ml-4 list-decimal">
+            <li>Уступка попадёт к УСКО на проверку комплекта (этап usko_review)</li>
+            <li>УСКО сверит сумму с лимитом должника, проверит документы</li>
+            <li>{totalAmount > 50000 ? <span><strong>Сумма &gt; 50К → потребуется решение ЛПР</strong></span> : "Сумма ≤ 50К → УСКО одобряет сам"}</li>
+            <li>УСКО заполнит карточки в АБС, получит счёт</li>
+            <li>Платформа сформирует ДФ + акт сверки → банк подпишет → вы подпишете → должник подпишет</li>
+            <li>УСКО оформит распоряжение на выдачу → деньги придут вам на счёт</li>
+          </ol>
+        </div>
+      </div>}
+
+      {/* ─── Footer with step navigation ─── */}
+      <div className="flex justify-between items-center pt-3 border-t" style={{borderColor: B.border}}>
+        <Btn variant="ghost" onClick={step === 1 ? onClose : () => setStep(step - 1)}>
+          {step === 1 ? "Отмена" : "← Назад"}
+        </Btn>
+        <div className="text-[10px]" style={{color: B.t3}}>
+          Шаг {step} из 4
+        </div>
+        {step < 4 ? <Btn variant="primary" icon={ArrowRight}
+          disabled={(step === 1 && !canGoStep2) || (step === 2 && !canGoStep3) || (step === 3 && !canGoStep4)}
+          onClick={() => setStep(step + 1)}>
+          Далее
+        </Btn> : <Btn variant="primary" icon={submitting ? Loader2 : CheckCircle}
+          disabled={submitting}
+          onClick={submit}>
+          {submitting ? "Отправка..." : "Создать уступку"}
+        </Btn>}
+      </div>
+    </div>
+  </Modal>;
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAGE: REPAYMENTS — модуль погашений (Сессия 8)
+// УСКО ежедневно утром загружает Excel-реестр платежей из АБС.
+// Платформа автоматически матчит платежи с активными уступками.
+// Несовпавшие — ручная проверка. Совпавшие — auto-close уступки.
+// ═══════════════════════════════════════════════════════════
+function RepaymentsPage({popNav, setToast, currentUser}) {
+  const [registryState] = useState(REPAYMENT_REGISTRY);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [filter, setFilter] = useState("all"); // all | today | unmatched
+
+  // Группировка по датам
+  const today = "2026-03-26";
+  const todayPayments = registryState.filter(p => p.uploadedDate === today);
+  const unmatched = registryState.filter(p => p.matchStatus === "unmatched" || p.matchStatus === "manual_review");
+  const filtered = filter === "today" ? todayPayments
+    : filter === "unmatched" ? unmatched
+    : registryState;
+
+  // Group by upload date
+  const byDate = {};
+  filtered.forEach(p => {
+    const d = p.uploadedDate;
+    if (!byDate[d]) byDate[d] = [];
+    byDate[d].push(p);
+  });
+
+  // Stats
+  const todayMatched = todayPayments.filter(p => p.matchStatus === "auto_matched").length;
+  const todayMatchedAmount = todayPayments.filter(p => p.matchStatus === "auto_matched").reduce((s, p) => s + p.amount, 0);
+  const todayUnmatched = todayPayments.filter(p => p.matchStatus !== "auto_matched").length;
+
+  return <div>
+    <PageHeader title="Погашения от должников"
+      subtitle="Ежедневная сверка платежей из АБС с активными уступками"
+      breadcrumbs={["Погашения"]}
+      actions={<div className="flex items-center gap-2">
+        <Btn size="sm" variant="primary" icon={Plus} onClick={() => setUploadModalOpen(true)}>
+          Загрузить реестр (Excel)
+        </Btn>
+      </div>}/>
+
+    {/* Info banner */}
+    <Card className="p-4 mb-4" style={{background: "#EEF2FF", borderColor: "#6366F1" + "30"}}>
+      <div className="flex items-start gap-2">
+        <span className="text-base shrink-0">📥</span>
+        <div className="text-[11px]" style={{color: B.t2}}>
+          <strong style={{color: "#6366F1"}}>Утренняя процедура УСКО.</strong> Каждое утро вы выгружаете из АБС Excel с поступлениями за вчерашний день и загружаете на платформу.
+          Платформа автоматически сопоставляет каждый платёж с активной уступкой по УНП должника, сумме и № ДФ из назначения платежа.
+          Совпавшие — автоматически закрываются. Несовпавшие попадают в очередь для ручного разбора.
+        </div>
+      </div>
+    </Card>
+
+    {/* KPI strip */}
+    <div className="grid grid-cols-4 gap-3 mb-5">
+      <Card className="p-3" style={{background: "#F0F9FF"}}>
+        <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: "#0891B2"}}>Загружено сегодня</div>
+        <div className="text-2xl font-black mono mt-1" style={{color: B.t1}}>{todayPayments.length}</div>
+        <div className="text-[10px]" style={{color: B.t3}}>платежей</div>
+      </Card>
+      <Card className="p-3" style={{background: B.greenL}}>
+        <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: B.green}}>Автосовпадение</div>
+        <div className="text-2xl font-black mono mt-1" style={{color: B.green}}>{todayMatched}</div>
+        <div className="text-[10px] mono" style={{color: B.t3}}>{fmtByn(todayMatchedAmount)}</div>
+      </Card>
+      <Card className="p-3" style={{background: todayUnmatched > 0 ? B.yellowL : "#F8FAFC"}}>
+        <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: todayUnmatched > 0 ? B.orange : B.t3}}>Ручная проверка</div>
+        <div className="text-2xl font-black mono mt-1" style={{color: todayUnmatched > 0 ? B.orange : B.t3}}>{todayUnmatched}</div>
+        <div className="text-[10px]" style={{color: B.t3}}>требуют действий</div>
+      </Card>
+      <Card className="p-3" style={{background: "white"}}>
+        <div className="text-[10px] uppercase font-bold tracking-wider" style={{color: B.t3}}>Всего за всё время</div>
+        <div className="text-2xl font-black mono mt-1" style={{color: B.t1}}>{registryState.length}</div>
+        <div className="text-[10px]" style={{color: B.t3}}>платежей загружено</div>
+      </Card>
+    </div>
+
+    {/* Filter tabs */}
+    <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 mb-4 inline-flex">
+      <button onClick={() => setFilter("all")}
+        className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${filter === "all" ? "bg-white shadow-sm" : "hover:text-slate-700"}`}
+        style={filter === "all" ? {color: B.accent} : {color: B.t3}}>
+        Все ({registryState.length})
+      </button>
+      <button onClick={() => setFilter("today")}
+        className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${filter === "today" ? "bg-white shadow-sm" : "hover:text-slate-700"}`}
+        style={filter === "today" ? {color: B.accent} : {color: B.t3}}>
+        Сегодня ({todayPayments.length})
+      </button>
+      <button onClick={() => setFilter("unmatched")}
+        className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${filter === "unmatched" ? "bg-white shadow-sm" : "hover:text-slate-700"}`}
+        style={filter === "unmatched" ? {color: B.orange} : {color: B.t3}}>
+        Требуют действий ({unmatched.length})
+      </button>
+    </div>
+
+    {/* Processing skeleton — пока парсится Excel */}
+    {processing && <Card className="p-4 mb-4" style={{background: "#EEF2FF", borderColor: "#6366F1" + "30"}}>
+      <div className="flex items-center gap-3 mb-3">
+        <Loader2 size={18} className="animate-spin" style={{color: "#6366F1"}}/>
+        <div>
+          <div className="text-xs font-bold" style={{color: "#6366F1"}}>Обработка реестра погашений</div>
+          <div className="text-[10px]" style={{color: B.t3}}>Парсим Excel, сопоставляем платежи с уступками...</div>
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Skeleton height="32px"/>
+        <Skeleton height="32px" width="92%"/>
+        <Skeleton height="32px" width="88%"/>
+      </div>
+    </Card>}
+
+    {/* Daily groups */}
+    <div className="space-y-4">
+      {Object.keys(byDate).sort().reverse().map(date => {
+        const payments = byDate[date];
+        const matched = payments.filter(p => p.matchStatus === "auto_matched");
+        const totalAmount = payments.reduce((s, p) => s + p.amount, 0);
+        return <Card key={date} className="p-0">
+          <div className="px-4 py-2.5 flex items-center justify-between" style={{background: "#F8FAFC", borderBottom: `1px solid ${B.border}`}}>
+            <div>
+              <div className="text-xs font-bold" style={{color: B.t1}}>
+                Реестр от {date} {date === today && <span className="text-[10px] ml-1 px-1.5 py-0.5 rounded" style={{background: B.greenL, color: B.green}}>Сегодня</span>}
+              </div>
+              <div className="text-[10px]" style={{color: B.t3}}>
+                Загружено: {payments[0]?.uploadedBy} · {payments[0]?.uploadedAt} · {payments.length} платежей · итого {fmtByn(totalAmount)}
+              </div>
+            </div>
+            <div className="text-[10px] font-bold" style={{color: B.green}}>
+              {matched.length}/{payments.length} автосовпадений
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead style={{background: "white", borderBottom: `1px solid ${B.border}`}}>
+              <tr>
+                <th className="text-left px-4 py-2 text-[10px] font-bold uppercase" style={{color: B.t3}}>Плательщик</th>
+                <th className="text-left px-4 py-2 text-[10px] font-bold uppercase" style={{color: B.t3}}>Назначение</th>
+                <th className="text-right px-4 py-2 text-[10px] font-bold uppercase" style={{color: B.t3}}>Сумма</th>
+                <th className="text-left px-4 py-2 text-[10px] font-bold uppercase" style={{color: B.t3}}>Статус</th>
+                <th className="text-left px-4 py-2 text-[10px] font-bold uppercase" style={{color: B.t3}}>Сопоставлено</th>
+                <th className="text-right px-4 py-2 text-[10px] font-bold uppercase" style={{color: B.t3}}>Действие</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payments.map(p => {
+                const matched = ASSIGNMENTS.find(a => a.id === p.matchedAssignmentId);
+                const statusCfg = REPAYMENT_MATCH_LABELS[p.matchStatus];
+                return <tr key={p.id} className="border-b hover:bg-slate-50" style={{borderColor: B.border}}>
+                  <td className="px-4 py-2.5">
+                    <div className="font-semibold" style={{color: B.t1}}>{p.payerName}</div>
+                    <div className="text-[10px] mono" style={{color: B.t3}}>УНП {p.payerUnp}</div>
+                  </td>
+                  <td className="px-4 py-2.5 max-w-[200px]">
+                    <div className="text-[11px] truncate" style={{color: B.t2}} title={p.paymentReference}>
+                      {p.paymentReference}
+                    </div>
+                    <div className="text-[10px] mono" style={{color: B.t3}}>сч. {p.bankAccount}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <div className="font-bold mono" style={{color: B.t1}}>{fmtByn(p.amount)}</div>
+                    <div className="text-[10px]" style={{color: B.t3}}>{p.paymentDate}</div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold inline-flex items-center gap-1"
+                      style={{background: statusCfg.color + "15", color: statusCfg.color}}>
+                      <span>{statusCfg.icon}</span> {statusCfg.label}
+                    </span>
+                    {p.confidence < 100 && p.confidence > 0 && <div className="text-[10px] mt-0.5" style={{color: B.t3}}>
+                      Уверенность: {p.confidence}%
+                    </div>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {matched ? <div>
+                      <div className="font-semibold mono" style={{color: B.t1}}>
+                        {matched.dfNumber || matched.dsNumber || matched.id}
+                      </div>
+                      <div className="text-[10px]" style={{color: B.green}}>
+                        ✓ Уступка закрыта
+                      </div>
+                    </div> : p.reasonForUnmatched ? <div className="text-[10px] italic" style={{color: B.orange}}>
+                      ⚠ {p.reasonForUnmatched}
+                    </div> : <span style={{color: B.t3}}>—</span>}
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    {p.matchStatus === "auto_matched" ? <span className="text-[10px]" style={{color: B.green}}>—</span>
+                      : <Btn size="sm" variant="ghost" onClick={() => setToast && setToast({msg: "Ручное сопоставление в разработке", type: "info"})}>
+                        Сопоставить
+                      </Btn>}
+                  </td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+          </div>
+        </Card>;
+      })}
+    </div>
+
+    {filtered.length === 0 && <Card className="p-8 text-center">
+      <div className="text-3xl mb-3">📭</div>
+      <div className="text-sm font-bold mb-1" style={{color: B.t1}}>Нет платежей</div>
+      <div className="text-[11px]" style={{color: B.t3}}>
+        {filter === "today" ? "На сегодня реестр ещё не загружен" : "Нет платежей по этому фильтру"}
+      </div>
+    </Card>}
+
+    {/* Upload Modal */}
+    {uploadModalOpen && <Modal open={true} onClose={() => setUploadModalOpen(false)} title="Загрузить реестр погашений">
+      <div className="space-y-4">
+        <div className="p-3 rounded-lg" style={{background: "#EEF2FF"}}>
+          <div className="text-[11px]" style={{color: B.t2}}>
+            <strong style={{color: "#6366F1"}}>Формат файла:</strong> Excel (.xlsx) из АБС банка с обязательными колонками:
+            <ul className="mt-1 ml-4 list-disc">
+              <li>УНП плательщика</li>
+              <li>Наименование плательщика</li>
+              <li>Сумма (BYN)</li>
+              <li>Дата платежа</li>
+              <li>Счёт зачисления (3819...)</li>
+              <li>Назначение платежа</li>
+            </ul>
+          </div>
+        </div>
+
+        <label className="flex flex-col items-center gap-2 p-8 rounded-xl cursor-pointer hover:bg-slate-50"
+          style={{border: `2px dashed ${B.border}`}}>
+          <input type="file" accept=".xlsx,.xls" className="hidden"
+            onChange={() => {
+              setProcessing(true);
+              setUploadModalOpen(false);
+              setToast && setToast({msg: "Файл загружен. Парсинг и автоматчинг...", type: "info"});
+              setTimeout(() => {
+                setProcessing(false);
+                setToast && setToast({msg: "Реестр обработан: 5 платежей загружено, 4 автосовпадения, 1 на ручную проверку", type: "success"});
+              }, 2200);
+            }}/>
+          <span className="text-3xl">📂</span>
+          <span className="text-sm font-semibold" style={{color: B.accent}}>Выбрать файл .xlsx</span>
+          <span className="text-[10px]" style={{color: B.t3}}>или перетащите файл сюда</span>
+        </label>
+
+        <div className="p-3 rounded-lg text-[10px]" style={{background: "#F8FAFC", color: B.t2}}>
+          <strong style={{color: B.t1}}>Что произойдёт после загрузки:</strong>
+          <ol className="mt-1 ml-4 list-decimal space-y-0.5">
+            <li>Платформа парсит Excel и валидирует обязательные поля</li>
+            <li>Для каждого платежа ищет активную уступку по УНП + сумма + № ДФ в назначении</li>
+            <li>Совпадения с уверенностью 100% — автоматически закрываются (stage → assignment_closed)</li>
+            <li>Совпадения 50-99% — попадают в очередь ручной проверки УСКО</li>
+            <li>Несовпадения — отдельная очередь, может потребоваться запрос в АБС</li>
+          </ol>
+        </div>
+
+        <div className="flex justify-end pt-3 border-t" style={{borderColor: B.border}}>
+          <Btn variant="ghost" onClick={() => setUploadModalOpen(false)}>Отмена</Btn>
+        </div>
+      </div>
+    </Modal>}
+  </div>;
 }
 
 // ═══════════════════════════════════════
@@ -13989,7 +17189,7 @@ function TemplatePicker({open, onClose, onGenerate}) {
 function BatchGenerateModal({open, onClose, onGenerate, assignments}) {
   const [selectedAsgIds, setSelectedAsgIds] = useState([]);
   const [docType, setDocType] = useState("notification");
-  const eligible = assignments.filter(a => a.stage === "docs_received" || a.stage === "debtor_notified" || a.stage === "debtor_confirming");
+  const eligible = assignments.filter(a => a.stage === "docs_received" || a.stage === "debtor_notified" || a.stage === "debtor_signing");
 
   const toggleAsg = (id) => setSelectedAsgIds(prev => prev.includes(id) ? prev.filter(x=>x!==id) : [...prev, id]);
   const selectAll = () => setSelectedAsgIds(eligible.map(a => a.id));
@@ -14551,7 +17751,7 @@ function ActiveProcessTab({currentUser, setToast}) {
           <select value={uploadAsgId} onChange={e=>setUploadAsgId(e.target.value)}
             className="w-full px-3 py-2 rounded-lg border text-xs bg-white" style={{borderColor:B.border, color:B.t1}}>
             <option value="">Выберите уступку...</option>
-            {ASSIGNMENTS.filter(a => a.stage !== "paid").map(a => {
+            {ASSIGNMENTS.filter(a => a.stage !== "payment_disbursed").map(a => {
               const cred = COMPANIES.find(c => c.id === a.creditorId);
               return <option key={a.id} value={a.id}>{a.id} · {cred?.name||""} · {fmtByn(a.amount)}</option>;
             })}
